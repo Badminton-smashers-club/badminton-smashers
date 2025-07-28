@@ -1,3 +1,11 @@
+import React, { useState, useEffect, createContext, useContext } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, signOut } from 'firebase/auth';
+import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, addDoc, getDocs, deleteDoc } from 'firebase/firestore';
+import { Home, User, LogIn, Calendar, Trophy, DollarSign, Users, PlusCircle, CheckCircle, XCircle, Bell, Settings, LogOut, Edit, Clock, List, TrendingUp, Info } from 'lucide-react';
+import CustomAlertDialog from '../components/CustomAlertDialog'; // Adjust the path if necessary
+
+
 const HomePage = ({ navigate, isAuthenticated }) => {
     return (
       <div className="bg-white p-8 rounded-2xl shadow-xl max-w-2xl w-full text-center transform transition-all duration-300 ease-in-out hover:scale-105">
@@ -28,4 +36,4 @@ const HomePage = ({ navigate, isAuthenticated }) => {
       </div>
     );
   };
-  
+export default HomePage;

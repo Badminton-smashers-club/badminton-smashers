@@ -1,54 +1,21 @@
 import React, { useState, useEffect, createContext, useContext } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from 'firebase/auth';
-import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, addDoc, getDocs, deleteDoc } from 'firebase/firestore';
+import { getAuth, onAuthStateChanged, signOut } from 'firebase/auth'; // signInAnonymously is now in LoginPage
+import { getFirestore, doc, getDoc } from 'firebase/firestore'; // Removed other Firestore imports as they are used in specific pages
 import { Home, User, LogIn, Calendar, Trophy, DollarSign, Users, PlusCircle, CheckCircle, XCircle, Bell, Settings, LogOut, Edit, Clock, List, TrendingUp, Info } from 'lucide-react';
+
+// Import your page components (ensure these files exist in src/pages/)
+import HomePage from './pages/HomePage';
+import LoginPage from './pages/LoginPage';
+import MemberDashboard from './pages/MemberDashboard';
+import AdminDashboard from './pages/AdminDashboard';
+import MatchManagementPage from './pages/MatchManagementPage';
+import LeaderboardPage from './pages/LeaderboardPage';
 
 // --- Context for Firebase and User Data ---
 const AppContext = createContext(null);
 
-// --- UTILS (Conceptual: utils/elo.js) ---
-const calculateEloChange = (playerElo, opponentElo, outcome, gamesPlayed = 0) => {
-  // K-factor: Higher for newer players, lower for established players
-  // This is a simplified variable K-factor. More advanced systems might use different thresholds.
-  let kFactor;
-  if (gamesPlayed < 10) { // New players have higher volatility
-    kFactor = 40;
-  } else if (playerElo < 1500) { // Mid-range players
-    kFactor = 32;
-  } else { // High-rated players
-    kFactor = 24;
-  }
-
-  // Expected score for player A against player B
-  const expectedScore = 1 / (1 + Math.pow(10, (opponentElo - playerElo) / 400));
-  // Elo change
-  const eloChange = kFactor * (outcome - expectedScore);
-  return eloChange;
-};
-
-// --- COMPONENTS (Conceptual: components/CustomAlertDialog.js) ---
-
-
-// --- COMPONENTS (Conceptual: components/MatchDetailsModal.js) ---
-
-
-// --- COMPONENTS (Conceptual: components/RecurringSlotsModal.js) ---
-
-
-// --- PAGES (Conceptual: pages/HomePage.js) ---
-
-// --- PAGES (Conceptual: pages/LoginPage.js) ---
-
-// --- PAGES (Conceptual: pages/MemberDashboard.js) ---
-
-// --- PAGES (Conceptual: pages/AdminDashboard.js) ---
-
-// --- PAGES (Conceptual: pages/MatchManagementPage.js) ---
-
-// --- PAGES (Conceptual: pages/LeaderboardPage.js) ---
-
-// --- MAIN APP COMPONENT (Conceptual: App.js) ---
+// --- MAIN APP COMPONENT ---
 const App = () => {
   const [currentPage, setCurrentPage] = useState('home');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -57,79 +24,90 @@ const App = () => {
   const [db, setDb] = useState(null);
   const [auth, setAuth] = useState(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isDbReady, setIsDbReady] = useState(false); // New state to track Firestore readiness
   const [userData, setUserData] = useState(null); // Stores current user's private data from Firestore
   const [publicUserId, setPublicUserId] = useState(null); // Stores the ID of the user's public profile
+  const [appId, setAppId] = useState(null); // State to hold the Firebase Project ID
 
   // Firebase Initialization and Authentication
   useEffect(() => {
     try {
-      const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+      // *** YOUR ACTUAL FIREBASE CONFIGURATION GOES HERE ***
+      // This should be copied directly from your Firebase Console -> Project settings -> Your apps -> Web app
+      const firebaseConfig = {
+        apiKey: "AIzaSyDKwvLR1ytSmKcl_Dw7CP09clBYw_xouEE",
+        authDomain: "smashers-badminton.firebaseapp.com",
+        projectId: "smashers-badminton",
+        storageBucket: "smashers-badminton.firebasestorage.app",
+        messagingSenderId: "743415345915",
+        appId: "1:743415345915:web:d8d04bcdce55b8848db65e",
+        measurementId: "G-MBDWPN0VNP" // Optional, if you use Analytics
+      };
+
       const app = initializeApp(firebaseConfig);
       const firestoreDb = getFirestore(app);
       const firebaseAuth = getAuth(app);
 
       setDb(firestoreDb);
       setAuth(firebaseAuth);
+      setAppId(firebaseConfig.projectId); // Set the appId state from your firebaseConfig
+      setIsDbReady(true); // Set Firestore as ready after getting the instance
 
       const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
         if (user) {
+          console.log("App.js: onAuthStateChanged - User IS authenticated. UID:", user.uid);
           setUserId(user.uid); // Set Firebase Auth UID
           setIsAuthenticated(true);
 
           // Attempt to fetch user's private profile data
-          const userProfileRef = doc(firestoreDb, `artifacts/${__app_id}/users/${user.uid}/profile/data`);
-          const userDocSnap = await getDoc(userProfileRef);
+          const userProfileRef = doc(firestoreDb, `artifacts/${firebaseConfig.projectId}/users/${user.uid}/profile/data`);
+          let userDocSnap;
+          try {
+              userDocSnap = await getDoc(userProfileRef);
+          } catch (readError) {
+              console.error("App.js: Error reading user profile document:", readError);
+              userDocSnap = { exists: () => false }; // Treat as if document doesn't exist on error
+          }
 
           if (userDocSnap.exists()) {
             const data = userDocSnap.data();
+            console.log("App.js: User profile EXISTS. Navigating to:", data.role === 'admin' ? 'adminDashboard' : 'memberDashboard');
             setUserData(data);
             setUserRole(data.role);
             setPublicUserId(data.publicId); // Set the ID of their public profile
             setCurrentPage(data.role === 'admin' ? 'adminDashboard' : 'memberDashboard');
           } else {
-            // This case might happen if an anonymous user is signed in but hasn't "registered" yet.
-            // Or if their private profile was deleted.
-            // Default to member and prompt for login/registration.
-            setUserRole('member');
-            setUserData(null); // No private data yet
+            console.log("App.js: User profile DOES NOT EXIST. Navigating to login page to create profile.");
+            // If the document doesn't exist (or read failed), it means it's an authenticated user
+            // (e.g., from a previous anonymous session) but without a full profile.
+            // Direct them to the login page to establish their profile.
+            setUserRole('member'); // Default role until a full profile is created
+            setUserData(null);
             setPublicUserId(null);
-            setCurrentPage('login'); // Redirect to login/register to establish profile
+            setCurrentPage('login'); // Direct to login page for unprofiled users
           }
         } else {
+          // No user (not even anonymous) is authenticated.
+          console.log("App.js: onAuthStateChanged - No user authenticated. Navigating to login page.");
           setUserId(null);
           setIsAuthenticated(false);
           setUserRole(null);
           setUserData(null);
           setPublicUserId(null);
-          setCurrentPage('home'); // Go to home if logged out
-
-          // Sign in anonymously if no token is provided (for initial setup or public access)
-          if (typeof __initial_auth_token === 'undefined') {
-            await signInAnonymously(firebaseAuth);
-          }
+          setCurrentPage('login'); // Direct to login page if no user is authenticated
+          // DO NOT CALL signInAnonymously here. It should be user-initiated in LoginPage.
         }
         setIsAuthReady(true);
       });
 
-      // Sign in with custom token if available
-      const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-      if (initialAuthToken) {
-        signInWithCustomToken(firebaseAuth, initialAuthToken)
-          .catch((error) => {
-            console.error("Error signing in with custom token:", error);
-            // Fallback to anonymous sign-in if custom token fails
-            signInAnonymously(firebaseAuth);
-          });
-      } else {
-        signInAnonymously(firebaseAuth);
-      }
-
-      return () => unsubscribe(); // Clean up auth listener
-    } catch (error) {
-      console.error("Error initializing Firebase:", error);
+      // Clean up auth listener on component unmount
+      return () => unsubscribe();
+    }
+    catch (error) {
+      console.error("App.js: Error initializing Firebase:", error);
       setIsAuthReady(true); // Mark as ready even on error to avoid infinite loading
     }
-  }, []);
+  }, []); // Empty dependency array means this runs once on mount
 
   const navigate = (page) => {
     setCurrentPage(page);
@@ -139,20 +117,21 @@ const App = () => {
     if (auth) {
       try {
         await signOut(auth);
-        console.log("User signed out.");
+        console.log("App.js: User signed out.");
         setUserId(null);
         setIsAuthenticated(false);
         setUserRole(null);
         setUserData(null);
         setPublicUserId(null);
-        setCurrentPage('home');
+        setCurrentPage('home'); // After logout, go to home page
       } catch (error) {
-        console.error("Error signing out:", error);
+        console.error("App.js: Error signing out:", error);
       }
     }
   };
 
-  if (!isAuthReady) {
+  // Wait for both auth and DB to be ready before rendering the main app
+  if (!isAuthReady || !isDbReady || appId === null) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-100">
         <div className="text-xl font-semibold text-gray-700">Loading application...</div>
@@ -160,27 +139,34 @@ const App = () => {
     );
   }
 
-  const renderPage = () => {
-    switch (currentPage) {
-      case 'home':
-        return <HomePage navigate={navigate} isAuthenticated={isAuthenticated} />;
-      case 'login':
-        return <LoginPage navigate={navigate} auth={auth} db={db} appId={typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'} />;
-      case 'memberDashboard':
-        return isAuthenticated && userRole === 'member' ? <MemberDashboard userId={userId} publicUserId={publicUserId} db={db} appId={typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'} userData={userData} setUserData={setUserData} /> : <LoginPage navigate={navigate} auth={auth} db={db} appId={typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'} />;
-      case 'adminDashboard':
-        return isAuthenticated && userRole === 'admin' ? <AdminDashboard userId={userId} db={db} appId={typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'} /> : <LoginPage navigate={navigate} auth={auth} db={db} appId={typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'} />;
-      case 'matchManagement':
-        return isAuthenticated ? <MatchManagementPage userId={userId} db={db} appId={typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'} /> : <LoginPage navigate={navigate} auth={auth} db={db} appId={typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'} />;
-      case 'leaderboard':
-        return <LeaderboardPage db={db} appId={typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'} />;
-      default:
-        return <HomePage navigate={navigate} isAuthenticated={isAuthenticated} />;
-    }
-  };
+  // Render the selected PageComponent based on currentPage state
+  let PageComponent;
+  switch (currentPage) {
+    case 'home':
+      PageComponent = <HomePage navigate={navigate} isAuthenticated={isAuthenticated} />;
+      break;
+    case 'login':
+      PageComponent = <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
+      break;
+    case 'memberDashboard':
+      PageComponent = isAuthenticated && userRole === 'member' ? <MemberDashboard userId={userId} publicUserId={publicUserId} db={db} appId={appId} userData={userData} setUserData={setUserData} /> : <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
+      break;
+    case 'adminDashboard':
+      PageComponent = isAuthenticated && userRole === 'admin' ? <AdminDashboard userId={userId} db={db} appId={appId} /> : <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
+      break;
+    case 'matchManagement':
+      PageComponent = isAuthenticated ? <MatchManagementPage userId={userId} db={db} appId={appId} /> : <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
+      break;
+    case 'leaderboard':
+      PageComponent = <LeaderboardPage db={db} appId={appId} />;
+      break;
+    default:
+      PageComponent = <HomePage navigate={navigate} isAuthenticated={isAuthenticated} />;
+  }
+
 
   return (
-    <AppContext.Provider value={{ db, auth, userId, isAuthenticated, userRole, userData, setUserData, appId: typeof __app_id !== 'undefined' ? __app_id : 'default-app-id' }}>
+    <AppContext.Provider value={{ db, auth, userId, isAuthenticated, userRole, userData, setUserData, appId: appId }}>
       <div className="min-h-screen bg-gradient-to-br from-blue-100 to-purple-100 font-inter flex flex-col">
         {/* Header */}
         <header className="bg-white shadow-md p-4 flex items-center justify-between rounded-b-xl">
@@ -226,7 +212,7 @@ const App = () => {
 
         {/* Main Content Area */}
         <main className="flex-grow p-6 flex items-center justify-center">
-          {renderPage()}
+          {PageComponent} {/* Render the selected PageComponent */}
         </main>
 
         {/* Footer */}

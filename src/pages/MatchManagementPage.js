@@ -1,3 +1,13 @@
+import React, { useState, useEffect, createContext, useContext } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, signOut } from 'firebase/auth';
+import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, addDoc, getDocs, deleteDoc } from 'firebase/firestore';
+import { Home, User, LogIn, Calendar, Trophy, DollarSign, Users, PlusCircle, CheckCircle, XCircle, Bell, Settings, LogOut, Edit, Clock, List, TrendingUp, Info } from 'lucide-react';
+import CustomAlertDialog from '../components/CustomAlertDialog'; // Adjust the path if necessary
+import MatchDetailsModal from '../components/MatchDetailsModal'; // Adjust the path if necessary
+import calculateEloChange from '../utils/elo'; // Adjust the path if necessary
+
+
 const MatchManagementPage = ({ userId, db, appId }) => {
     const [members, setMembers] = useState([]);
     const [matches, setMatches] = useState([]);
@@ -135,16 +145,14 @@ const MatchManagementPage = ({ userId, db, appId }) => {
               const playerProfileRef = doc(db, `artifacts/${appId}/users/${uid}/profile/data`);
               const playerDocSnap = await getDoc(playerProfileRef);
               if (playerDocSnap.exists()) {
-                  playerStatsMap.set(uid, {
-                      eloRating: playerDocSnap.data().eloRating || 1000,
-                      gamesPlayed: playerDocSnap.data().gamesPlayed || 0,
-                      publicId: playerDocSnap.data().publicId
-                  });
-              } else {
-                  // This scenario should ideally not happen if users are properly registered
-                  console.warn(`Player profile not found for UID: ${uid}. Defaulting Elo to 1000.`);
-                  playerStatsMap.set(uid, { eloRating: 1000, gamesPlayed: 0, publicId: null });
-              }
+                // Store the entire data object from the private profile
+                playerStatsMap.set(uid, playerDocSnap.data());
+            } else {
+                // This scenario should ideally not happen if users are properly registered
+                console.warn(`Player profile not found for UID: ${uid}. Defaulting Elo to 1000.`);
+                // Ensure default object also includes an empty scores array
+                playerStatsMap.set(uid, { eloRating: 1000, gamesPlayed: 0, scores: [], publicId: null });
+            }
           }
   
           // Calculate average Elo for each team
@@ -165,7 +173,7 @@ const MatchManagementPage = ({ userId, db, appId }) => {
             const currentGamesPlayed = currentStats.gamesPlayed;
             const publicId = currentStats.publicId;
   
-            const newScores = [...(playerData.scores || [])]; // playerData is from the initial fetch, might be stale. Use currentStats.scores if available.
+            const newScores = [...(currentStats.scores || [])];
                                                               // For simplicity, we'll append to the fetched scores.
   
             let outcome; // 1 for win, 0.5 for draw, 0 for loss
@@ -464,4 +472,4 @@ const MatchManagementPage = ({ userId, db, appId }) => {
       </div>
     );
   };
-  
+export default MatchManagementPage

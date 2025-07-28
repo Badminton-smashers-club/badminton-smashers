@@ -1,3 +1,11 @@
+import React, { useState, useEffect, createContext, useContext } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, signOut } from 'firebase/auth';
+import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, addDoc, getDocs, deleteDoc } from 'firebase/firestore';
+import { Home, User, LogIn, Calendar, Trophy, DollarSign, Users, PlusCircle, CheckCircle, XCircle, Bell, Settings, LogOut, Edit, Clock, List, TrendingUp, Info } from 'lucide-react';
+import CustomAlertDialog from '../components/CustomAlertDialog'; // Adjust the path if necessary
+
+
 const LeaderboardPage = ({ db, appId }) => {
     const [members, setMembers] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -85,4 +93,4 @@ const LeaderboardPage = ({ db, appId }) => {
         </div>
     );
 };
-
+export default LeaderboardPage;

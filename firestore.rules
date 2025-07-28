@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Rules for the public users collection
+    match /artifacts/{appId}/public/data/users/{publicUserId} {
+      // Allow authenticated users to read public user data
+      allow read: if request.auth != null;
+
+      // Allow creating a new public user document during registration
+      // Ensure the publicUserId is automatically generated (not specified by the client)
+      // and that the initial data is valid (e.g., role is 'member', firebaseAuthUid is the current user's UID)
+      allow create: if request.auth != null
+                    && request.resource.data.role == 'member'
+                    && request.resource.data.firebaseAuthUid == request.auth.uid;
+
+      // Allow updating the public user document to link the firebaseAuthUid
+      // Only allow the authenticated user to update their own public document
+      // and only allow updates to specific fields if needed
+      allow update: if request.auth != null
+                    && request.auth.uid == request.resource.data.firebaseAuthUid
+                    // Add conditions here if you want to restrict which fields can be updated in the public profile
+                    // && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['firebaseAuthUid']) // Example: only allow updating firebaseAuthUid
+                    ;
+    }
+
+    // Rules for the private user profile data
+    match /artifacts/{appId}/users/{userId}/profile/data {
+      // Allow authenticated users to read their own private profile data
+      allow read: if request.auth != null && request.auth.uid == userId;
+
+      // Allow authenticated users to create or update their own private profile data
+      // This is used after successful login/registration in LoginPage.js
+      // You might want to add validation here to ensure data integrity
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Default deny rule for all other documents
+    // This is important to prevent unauthorized access to any other collections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
