@@ -1,29 +1,57 @@
 import React, { useState, useEffect } from 'react';
-// Only import what's needed for LoginPage itself
 import { collection, query, where, getDocs, addDoc, doc, setDoc, updateDoc } from 'firebase/firestore';
-import { LogIn, User } from 'lucide-react';
-import CustomAlertDialog from '../components/CustomAlertDialog'; // Ensure this path is correct if CustomAlertDialog is a separate file
-import { signInAnonymously } from 'firebase/auth'; // <--- ADDED THIS IMPORT
+import { LogIn, User, Eye, EyeOff } from 'lucide-react'; // Import Eye and EyeOff
+import CustomAlertDialog from '../components/CustomAlertDialog';
+import { signInAnonymously } from 'firebase/auth';
+import { dummyUsers } from '../utils/dummyUsers';
 
-const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => { // Added isDbReady prop
+const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [name, setName] = useState(''); // For registration
+  const [name, setName] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
   const [message, setMessage] = useState('');
   const [showAlert, setShowAlert] = useState(false);
   const [alertMessage, setAlertMessage] = useState('');
+  const [showPassword, setShowPassword] = useState(false); // New state for password visibility
 
-  // Effect to set up dummy users if the collection is empty
+  // Effect to clear form fields when switching between login/register
+  useEffect(() => {
+    setUsername('');
+    setPassword('');
+    setName('');
+    setMessage('');
+    setAlertMessage('');
+    setShowAlert(false);
+  }, [isRegistering]);
+
+  // Effect to set up dummy users if the collection is empty (for development only)
   useEffect(() => {
     const setupDummyUsers = async () => {
       console.log('LoginPage useEffect: Attempting to setup dummy users...');
-      console.log('LoginPage useEffect: db:', db ? 'initialized' : 'null', 'appId:', appId, 'isDbReady:', isDbReady);
+      console.log('LoginPage useEffect: db:', db ? 'initialized' : 'null', 'appId:', appId, 'isDbReady:', isDbReady, 'auth:', auth ? 'initialized' : 'null');
 
-      // Ensure db, appId, and isDbReady are available before attempting Firestore operations
-      if (!db || !appId || !isDbReady) {
-        console.log('LoginPage useEffect: db, appId, or isDbReady not ready, skipping dummy user setup.');
+      if (!db || !appId || !isDbReady || !auth) {
+        console.log('LoginPage useEffect: db, appId, isDbReady, or auth not ready, skipping dummy user setup.');
         return;
+      }
+
+      let currentAuthUser = auth.currentUser;
+      // Ensure an anonymous user is authenticated before attempting to create dummy users
+      if (!currentAuthUser) {
+        console.log('LoginPage useEffect: No current Firebase Auth user, signing in anonymously for dummy setup...');
+        try {
+          const userCredential = await signInAnonymously(auth);
+          currentAuthUser = userCredential.user;
+          console.log('LoginPage useEffect: Signed in anonymously for dummy setup. UID:', currentAuthUser.uid);
+        } catch (authError) {
+          console.error('LoginPage useEffect: Error signing in anonymously for dummy setup:', authError);
+          setAlertMessage(`Error authenticating for dummy setup: ${authError.message}`);
+          setShowAlert(true);
+          return;
+        }
+      } else {
+        console.log('LoginPage useEffect: Existing Firebase Auth user for dummy setup. UID:', currentAuthUser.uid);
       }
 
       try {
@@ -34,31 +62,11 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => { // Added isDbR
 
         if (querySnapshot.empty) {
           console.log("LoginPage useEffect: Users collection empty. Setting up dummy users...");
-          // Add dummy member
-          await addDoc(usersRef, {
-            username: 'member1',
-            password: 'password123',
-            name: 'Alice Member',
-            role: 'member',
-            balance: 50.00,
-            scores: [],
-            eloRating: 1000,
-            gamesPlayed: 0,
-            firebaseAuthUid: null
-          });
-          // Add dummy admin
-          await addDoc(usersRef, {
-            username: 'admin1',
-            password: 'adminpassword',
-            name: 'Charlie Admin',
-            role: 'admin',
-            balance: 0.00,
-            scores: [],
-            eloRating: 1000,
-            gamesPlayed: 0,
-            firebaseAuthUid: null
-          });
-          setMessage('Dummy users created: member1/password123, admin1/adminpassword. Try logging in!');
+          for (const user of dummyUsers) {
+            const userToCreate = { ...user };
+            userToCreate.firebaseAuthUid = currentAuthUser.uid; // Link to the current anonymous UID
+            await addDoc(usersRef, userToCreate);
+          }
           console.log("LoginPage useEffect: Dummy users added successfully.");
         } else {
           console.log("LoginPage useEffect: Dummy users already exist, skipping setup.");
@@ -70,10 +78,10 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => { // Added isDbR
       }
     };
 
-    if (db && appId && isDbReady) {
+    if (db && appId && isDbReady && auth && window.location.hostname === "localhost") {
       setupDummyUsers();
     }
-  }, [db, appId, isDbReady]); // Re-run effect if db, appId, or isDbReady changes
+  }, [db, appId, isDbReady, auth]);
 
   const handleAuth = async (e) => {
     e.preventDefault();
@@ -83,7 +91,7 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => { // Added isDbR
     console.log('LoginPage handleAuth: Starting authentication process...');
     console.log('LoginPage handleAuth: db:', db ? 'initialized' : 'null', 'appId:', appId, 'auth:', auth ? 'initialized' : 'null', 'isDbReady:', isDbReady);
 
-    if (!db || !appId || !auth || !isDbReady) { // auth.currentUser might be null initially
+    if (!db || !appId || !auth || !isDbReady) {
       setAlertMessage('Application not fully initialized. Please wait and try again.');
       setShowAlert(true);
       console.error("LoginPage handleAuth: Firebase/Auth/AppId/isDbReady not ready.");
@@ -91,8 +99,6 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => { // Added isDbR
     }
 
     try {
-      // Step 1: Ensure an anonymous Firebase Auth user exists for Firestore UID linkage
-      // This is now done only when the user attempts to log in/register
       let currentAuthUser = auth.currentUser;
       if (!currentAuthUser) {
         console.log('LoginPage handleAuth: No current Firebase Auth user, signing in anonymously...');
@@ -103,7 +109,6 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => { // Added isDbR
         console.log('LoginPage handleAuth: Existing Firebase Auth user. UID:', currentAuthUser.uid);
       }
 
-      // Find the user in the public users collection
       const usersRefPath = `artifacts/${appId}/public/data/users`;
       const usersRef = collection(db, usersRefPath);
       const q = query(usersRef, where("username", "==", username));
@@ -114,7 +119,6 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => { // Added isDbR
       let publicUserData;
 
       if (isRegistering) {
-        // --- Registration Logic ---
         if (!querySnapshot.empty) {
           setAlertMessage('Username already exists. Please choose a different one.');
           setShowAlert(true);
@@ -143,7 +147,6 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => { // Added isDbR
         console.log('LoginPage handleAuth: New public user registered.');
 
       } else {
-        // --- Login Logic ---
         if (querySnapshot.empty) {
           setAlertMessage('Invalid username or password.');
           setShowAlert(true);
@@ -162,14 +165,12 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => { // Added isDbR
         console.log('LoginPage handleAuth: User found and password matched.');
       }
 
-      // Update the public user document with the current Firebase Auth UID if it's missing or different
       if (publicUserData.firebaseAuthUid !== currentAuthUser.uid) {
         console.log('LoginPage handleAuth: Updating public user with current Firebase Auth UID.');
         await updateDoc(userDocRef, { firebaseAuthUid: currentAuthUser.uid });
         publicUserData.firebaseAuthUid = currentAuthUser.uid;
       }
 
-      // Create or update the user's private profile data (linked to the Firebase Auth UID)
       const userProfileRefPath = `artifacts/${appId}/users/${currentAuthUser.uid}/profile/data`;
       const userProfileRef = doc(db, userProfileRefPath);
       console.log('LoginPage handleAuth: Setting/updating private user profile. Path:', userProfileRefPath);
@@ -185,8 +186,7 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => { // Added isDbR
       }, { merge: true });
       console.log('LoginPage handleAuth: Private user profile set/updated.');
 
-      // After successful login/registration, navigate to the appropriate dashboard
-      navigate(publicUserData.role === 'admin' ? 'adminDashboard' : 'memberDashboard');
+      // REMOVED direct navigate call from here. App.js's onAuthStateChanged will handle navigation.
 
     } catch (error) {
       console.error("LoginPage handleAuth: Authentication error:", error);
@@ -223,16 +223,24 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => { // Added isDbR
             required
           />
         </div>
-        <div>
+        <div className="relative">
           <label htmlFor="password" className="block text-gray-700 text-sm font-medium mb-2">Password</label>
           <input
-            type="password"
+            type={showPassword ? "text" : "password"} 
             id="password"
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200 ease-in-out"
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200 ease-in-out pr-10" 
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
           />
+          <button
+            type="button" 
+            onClick={() => setShowPassword(!showPassword)}
+            className="absolute inset-y-0 right-0 pr-3 flex items-center pt-6 text-gray-500 hover:text-blue-600 focus:outline-none"
+            aria-label={showPassword ? "Hide password" : "Show password"}
+          >
+            {showPassword ? <EyeOff size={20} /> : <Eye size={20} />} 
+          </button>
         </div>
         <button
           type="submit"
@@ -252,10 +260,6 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => { // Added isDbR
       >
         {isRegistering ? 'Already have an account? Login' : 'New member? Register here'}
       </button>
-      <p className="mt-6 text-center text-sm text-gray-500">
-        For testing: Member Username: <span className="font-semibold">member1</span>, Password: <span className="font-semibold">password123</span><br/>
-        Admin Username: <span className="font-semibold">admin1</span>, Password: <span className="font-semibold">adminpassword</span>
-      </p>
       {showAlert && (
         <CustomAlertDialog
           message={alertMessage}

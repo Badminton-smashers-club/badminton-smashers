@@ -7,21 +7,16 @@ service cloud.firestore {
       // Allow authenticated users to read public user data
       allow read: if request.auth != null;
 
-      // Allow creating a new public user document during registration
-      // Ensure the publicUserId is automatically generated (not specified by the client)
-      // and that the initial data is valid (e.g., role is 'member', firebaseAuthUid is the current user's UID)
+      // Allow creating a new public user document during registration.
+      // Requires an authenticated user and validation of role and linked UID.
       allow create: if request.auth != null
-                    && request.resource.data.role == 'member'
+                    && (request.resource.data.role == 'member' || request.resource.data.role == 'admin')
                     && request.resource.data.firebaseAuthUid == request.auth.uid;
 
       // Allow updating the public user document to link the firebaseAuthUid
       // Only allow the authenticated user to update their own public document
-      // and only allow updates to specific fields if needed
       allow update: if request.auth != null
-                    && request.auth.uid == request.resource.data.firebaseAuthUid
-                    // Add conditions here if you want to restrict which fields can be updated in the public profile
-                    // && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['firebaseAuthUid']) // Example: only allow updating firebaseAuthUid
-                    ;
+                    && request.auth.uid == request.resource.data.firebaseAuthUid;
     }
 
     // Rules for the private user profile data
@@ -31,7 +26,6 @@ service cloud.firestore {
 
       // Allow authenticated users to create or update their own private profile data
       // This is used after successful login/registration in LoginPage.js
-      // You might want to add validation here to ensure data integrity
       allow write: if request.auth != null && request.auth.uid == userId;
     }
 

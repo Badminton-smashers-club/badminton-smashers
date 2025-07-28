@@ -1,7 +1,7 @@
 import React, { useState, useEffect, createContext, useContext } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, onAuthStateChanged, signOut } from 'firebase/auth'; // signInAnonymously is now in LoginPage
-import { getFirestore, doc, getDoc } from 'firebase/firestore'; // Removed other Firestore imports as they are used in specific pages
+import { getAuth, onAuthStateChanged, signOut, connectAuthEmulator } from 'firebase/auth'; 
+import { getFirestore, doc, getDoc, connectFirestoreEmulator } from 'firebase/firestore'; 
 import { Home, User, LogIn, Calendar, Trophy, DollarSign, Users, PlusCircle, CheckCircle, XCircle, Bell, Settings, LogOut, Edit, Clock, List, TrendingUp, Info } from 'lucide-react';
 
 // Import your page components (ensure these files exist in src/pages/)
@@ -18,7 +18,7 @@ const AppContext = createContext(null);
 // --- MAIN APP COMPONENT ---
 const App = () => {
   const [currentPage, setCurrentPage] = useState('home');
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false); // Reflects if a *full profile* is loaded
   const [userRole, setUserRole] = useState(null); // 'member' or 'admin'
   const [userId, setUserId] = useState(null); // Firebase Auth UID
   const [db, setDb] = useState(null);
@@ -32,8 +32,6 @@ const App = () => {
   // Firebase Initialization and Authentication
   useEffect(() => {
     try {
-      // *** YOUR ACTUAL FIREBASE CONFIGURATION GOES HERE ***
-      // This should be copied directly from your Firebase Console -> Project settings -> Your apps -> Web app
       const firebaseConfig = {
         apiKey: "AIzaSyDKwvLR1ytSmKcl_Dw7CP09clBYw_xouEE",
         authDomain: "smashers-badminton.firebaseapp.com",
@@ -48,25 +46,30 @@ const App = () => {
       const firestoreDb = getFirestore(app);
       const firebaseAuth = getAuth(app);
 
+      // Connect to Firebase Emulators if running locally
+      if (window.location.hostname === "localhost") {
+        connectFirestoreEmulator(firestoreDb, 'localhost', 8080);
+        connectAuthEmulator(firebaseAuth, 'http://localhost:9099');
+        console.log("App.js: Connected to Firebase Emulators.");
+      }
+
       setDb(firestoreDb);
       setAuth(firebaseAuth);
-      setAppId(firebaseConfig.projectId); // Set the appId state from your firebaseConfig
-      setIsDbReady(true); // Set Firestore as ready after getting the instance
+      setAppId(firebaseConfig.projectId);
+      setIsDbReady(true);
 
       const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
         if (user) {
-          console.log("App.js: onAuthStateChanged - User IS authenticated. UID:", user.uid);
-          setUserId(user.uid); // Set Firebase Auth UID
-          setIsAuthenticated(true);
+          console.log("App.js: onAuthStateChanged - Firebase Auth User IS authenticated. UID:", user.uid);
+          setUserId(user.uid); 
 
-          // Attempt to fetch user's private profile data
           const userProfileRef = doc(firestoreDb, `artifacts/${firebaseConfig.projectId}/users/${user.uid}/profile/data`);
           let userDocSnap;
           try {
               userDocSnap = await getDoc(userProfileRef);
           } catch (readError) {
               console.error("App.js: Error reading user profile document:", readError);
-              userDocSnap = { exists: () => false }; // Treat as if document doesn't exist on error
+              userDocSnap = { exists: () => false };
           }
 
           if (userDocSnap.exists()) {
@@ -74,40 +77,36 @@ const App = () => {
             console.log("App.js: User profile EXISTS. Navigating to:", data.role === 'admin' ? 'adminDashboard' : 'memberDashboard');
             setUserData(data);
             setUserRole(data.role);
-            setPublicUserId(data.publicId); // Set the ID of their public profile
+            setPublicUserId(data.publicId);
+            setIsAuthenticated(true); // Set true only if a full profile exists
             setCurrentPage(data.role === 'admin' ? 'adminDashboard' : 'memberDashboard');
           } else {
             console.log("App.js: User profile DOES NOT EXIST. Navigating to login page to create profile.");
-            // If the document doesn't exist (or read failed), it means it's an authenticated user
-            // (e.g., from a previous anonymous session) but without a full profile.
-            // Direct them to the login page to establish their profile.
-            setUserRole('member'); // Default role until a full profile is created
             setUserData(null);
+            setUserRole(null); // Explicitly set to null if no profile
             setPublicUserId(null);
-            setCurrentPage('login'); // Direct to login page for unprofiled users
+            setIsAuthenticated(false); // Explicitly set false if no profile
+            setCurrentPage('login');
           }
         } else {
-          // No user (not even anonymous) is authenticated.
-          console.log("App.js: onAuthStateChanged - No user authenticated. Navigating to login page.");
+          console.log("App.js: onAuthStateChanged - No Firebase Auth user authenticated. Navigating to login page.");
           setUserId(null);
           setIsAuthenticated(false);
           setUserRole(null);
           setUserData(null);
           setPublicUserId(null);
-          setCurrentPage('login'); // Direct to login page if no user is authenticated
-          // DO NOT CALL signInAnonymously here. It should be user-initiated in LoginPage.
+          setCurrentPage('login');
         }
         setIsAuthReady(true);
       });
 
-      // Clean up auth listener on component unmount
       return () => unsubscribe();
     }
     catch (error) {
       console.error("App.js: Error initializing Firebase:", error);
-      setIsAuthReady(true); // Mark as ready even on error to avoid infinite loading
+      setIsAuthReady(true);
     }
-  }, []); // Empty dependency array means this runs once on mount
+  }, []);
 
   const navigate = (page) => {
     setCurrentPage(page);
@@ -123,7 +122,7 @@ const App = () => {
         setUserRole(null);
         setUserData(null);
         setPublicUserId(null);
-        setCurrentPage('home'); // After logout, go to home page
+        setCurrentPage('home');
       } catch (error) {
         console.error("App.js: Error signing out:", error);
       }
@@ -149,12 +148,15 @@ const App = () => {
       PageComponent = <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
       break;
     case 'memberDashboard':
+      // Only show dashboard if isAuthenticated is true (meaning full profile exists) and role matches
       PageComponent = isAuthenticated && userRole === 'member' ? <MemberDashboard userId={userId} publicUserId={publicUserId} db={db} appId={appId} userData={userData} setUserData={setUserData} /> : <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
       break;
     case 'adminDashboard':
+      // Only show dashboard if isAuthenticated is true (meaning full profile exists) and role matches
       PageComponent = isAuthenticated && userRole === 'admin' ? <AdminDashboard userId={userId} db={db} appId={appId} /> : <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
       break;
     case 'matchManagement':
+      // Only allow access if isAuthenticated is true (meaning full profile exists)
       PageComponent = isAuthenticated ? <MatchManagementPage userId={userId} db={db} appId={appId} /> : <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
       break;
     case 'leaderboard':
@@ -178,6 +180,7 @@ const App = () => {
             <button onClick={() => navigate('home')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
               <Home className="mr-1" size={20} /> Home
             </button>
+            {/* Conditionally render dashboard links based on isAuthenticated and userRole */}
             {isAuthenticated && userRole === 'member' && (
               <button onClick={() => navigate('memberDashboard')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
                 <User className="mr-1" size={20} /> Dashboard
@@ -188,6 +191,7 @@ const App = () => {
                 <Settings className="mr-1" size={20} /> Admin
               </button>
             )}
+            {/* Matches and Leaderboard might be accessible to unauthenticated users depending on rules, but currently they also require isAuthenticated *before* a full profile is loaded, which is incorrect.  They should also be guarded by isAuthenticated for consistency */}
             {isAuthenticated && (
               <button onClick={() => navigate('matchManagement')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
                 <Trophy className="mr-1" size={20} /> Matches
