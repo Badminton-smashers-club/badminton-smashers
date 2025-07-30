@@ -2,136 +2,90 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Global artifact ID (e.g., smashers-badminton-dev) - Best to define this
     match /artifacts/{appId} {
-      // Allow only authenticated reads/writes on the base artifact document
-      // (This applies to the artifact document itself, not subcollections. Listing 'artifacts' collection not allowed here unless explicitly added)
-      allow read, write: if request.auth != null;
 
-      // --- Rules for Public Data Collections ---
-      // Each collection path should be fully defined from the root within /artifacts/{appId}
+      // 🔹 Helper Functions
+      function isSignedIn() {
+        return request.auth != null;
+      }
 
+      function isAdmin(appId) {
+        return isSignedIn() &&
+          get(/databases/$(database)/documents/artifacts/$(appId)/public/data/users/$(request.auth.uid)).data.role == 'admin';
+      }
+
+      function isMatchConfirmingPlayer() {
+        return resource.data.status == 'pending_confirmation' &&
+          (resource.data.team1.hasAny([request.auth.uid]) || resource.data.team2.hasAny([request.auth.uid])) &&
+          !resource.data.confirmedBy.hasAny([request.auth.uid]) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['confirmedBy']) &&
+          request.resource.data.confirmedBy is list &&
+          request.resource.data.confirmedBy.hasAll(resource.data.confirmedBy.concat([request.auth.uid])) &&
+          request.resource.data.confirmedBy.size() == resource.data.confirmedBy.size() + 1;
+      }
+
+      // 🔹 Public User Profiles
       match /public/data/users/{publicUserId} {
-        // Allow ANYONE (authenticated or not) to read ALL public user data.
-        // This allows client-side code to query the 'users' collection for leaderboards, etc.
         allow read: if true;
 
-        // Allow creating a new public user document during registration.
-        // The document ID (publicUserId) must match the firebaseAuthUid being written into the document.
-        // This allows initial creation even if request.auth is momentarily null (race condition fix).
-        // Role must be 'member' or 'admin'.
         allow create: if request.resource.data.firebaseAuthUid == publicUserId
-                        && (request.resource.data.role == 'member' || request.resource.data.role == 'admin');
+                      && (request.resource.data.role == 'member' || request.resource.data.role == 'admin');
 
-        // Allow updating the public user document only if the authenticated user is the owner.
-        // Prevents users from directly modifying other users' public Elo/scores from the client (updated by functions).
-        allow update: if request.auth != null
-                        && request.auth.uid == publicUserId // Ensure owner updates their document
-                        // Ensure only 'name' and 'profilePicUrl' are allowed to be modified by the client.
-                        // This also implicitly verifies that other existing fields (like eloRating, gamesPlayed, balance, role, firebaseAuthUid, createdAt, lastGameDate)
-                        // are not changed, and no new unauthorized fields are introduced by the client.
-                        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'profilePicUrl'])
-                        // Ensure the type of the 'name' and 'profilePicUrl' fields are strings.
-                        && request.resource.data.name is string
-                        && request.resource.data.profilePicUrl is string;
+        allow update: if isSignedIn()
+                      && request.auth.uid == publicUserId
+                      && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'profilePicUrl'])
+                      && request.resource.data.name is string
+                      && request.resource.data.profilePicUrl is string;
 
-        // Allow deletion of public user documents by the owner or admin (if needed)
-        allow delete: if request.auth != null && (request.auth.uid == publicUserId || get(/databases/$(database)/documents/artifacts/$(appId)/public/data/users/$(request.auth.uid)).data.role == 'admin');
+        allow delete: if isSignedIn()
+                      && (request.auth.uid == publicUserId || isAdmin(appId));
       }
 
+      // 🔹 App Settings (Admins only)
       match /public/data/appSettings/{docId} {
-        allow read: if true; // Publicly readable
-        allow write: if request.auth != null && get(/databases/$(database)/documents/artifacts/$(appId)/public/data/users/$(request.auth.uid)).data.role == 'admin'; // Only admin can write
-      }
-
-      match /public/data/slots/{slotId} {
-        allow read: if request.auth != null; // Allow any authenticated user to read slots
-        allow create: if request.auth != null && get(/databases/$(database)/documents/artifacts/$(appId)/public/data/users/$(request.auth.uid)).data.role == 'admin'; // Allow creating slots only by an admin
-        allow update: if request.auth != null && ( // Allow updating slots:
-            // 1. Admin can update any field.
-            get(/databases/$(database)/documents/artifacts/$(appId)/public/data/users/$(request.auth.uid)).data.role == 'admin' ||
-          (
-          // 2. A member can book or unbook a slot
-          (resource.data.bookedBy == null && request.resource.data.bookedBy == request.auth.uid) || // Booking
-          (resource.data.bookedBy == request.auth.uid && request.resource.data.bookedBy == null)    // Unbooking
-        )
-        );
-        allow delete: if request.auth != null && get(/databases/$(database)/documents/artifacts/$(appId)/public/data/users/$(request.auth.uid)).data.role == 'admin'; // Allow deleting slots only by an admin
-      }
-
-      // NEW RULE FOR WAITING LISTS (adjust path if needed)
-      match /public/data/waitingLists/{docId} {
-        allow read: if request.auth != null; // Allow any authenticated user to read waiting list data
-        // Allow authenticated users to create a waiting list entry,
-        // provided the 'userId' field in the new document matches their own UID.
-        allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
-        // Allow authenticated users to delete their own waiting list entry,
-        // provided the 'userId' field in the existing document matches their own UID.
-        allow delete: if request.auth != null && resource.data.userId == request.auth.uid;
-        // If you later need to allow updates (e.g., changing status), you'd add another 'allow update' rule here.
-        // For now, assume entries are immutable once created, except for deletion.
-      }
-      match /public/data/matches/{matchId} {
-        // [MODIFIED] Allow ANYONE (authenticated or not) to read all matches.
-        // This is necessary if match history is part of a public view or accessed before auth state fully propagates.
         allow read: if true;
-
-        allow create: if request.auth != null
-                      && request.resource.data.addedBy == request.auth.uid
-                      && (request.resource.data.team1.hasAny([request.auth.uid]) || request.resource.data.team2.hasAny([request.auth.uid]))
-                      && request.resource.data.status == 'pending_confirmation'
-                      && request.resource.data.confirmedBy.size() == 1
-                      && request.resource.data.confirmedBy.hasAll([request.auth.uid])
-                      && request.resource.data.score1 is int && request.resource.data.score2 is int
-                      && request.resource.data.score1 >= 0 && request.resource.data.score2 >= 0
-                      && request.resource.data.score1 != request.resource.data.score2; // No draws on creation
-
-        allow update: if request.auth != null && (
-            // Option 1: Admin can confirm or intervene (full write access if admin)
-            get(/databases/$(database)/documents/artifacts/$(appId)/public/data/users/$(request.auth.uid)).data.role == 'admin'
-            || (
-                // Option 2: A player in the match confirms the score
-                (resource.data.team1.hasAny([request.auth.uid]) || resource.data.team2.hasAny([request.auth.uid]))
-                && !resource.data.confirmedBy.hasAny([request.auth.uid])
-                // All other core fields (date, teams, scores, addedBy, createdAt) must remain unchanged by players.
-                && request.resource.data.date == resource.data.date
-                && request.resource.data.team1 == resource.data.team1
-                && request.resource.data.team2 == resource.data.team2
-                && request.resource.data.score1 == resource.data.score1
-                && request.resource.data.score2 == resource.data.score2
-                && request.resource.data.addedBy == resource.data.addedBy
-                && request.resource.data.createdAt == resource.data.createdAt
-                // 'confirmedBy' array must include the original values plus the current user's UID
-                && request.resource.data.confirmedBy.hasAll(resource.data.confirmedBy.concat([request.auth.uid]))
-                && request.resource.data.confirmedBy.size() == resource.data.confirmedBy.size() + 1
-                // The status must be transitioning from 'pending_confirmation' to 'confirmed' or staying 'pending_confirmation'
-                && resource.data.status == 'pending_confirmation'
-                && (request.resource.data.status == 'pending_confirmation' || request.resource.data.status == 'confirmed')
-            )
-        );
+        allow write: if isAdmin(appId);
       }
 
-      // --- Private User Data Collection ---
-      // This path is fully defined from the root within /artifacts/{appId}
+      // 🔹 Slots (Admin only modification)
+      match /public/data/slots/{slotId} {
+        allow read: if isSignedIn();
+        allow create, update, delete: if isAdmin(appId);
+      }
+
+      // 🔹 Waiting Lists
+      match /public/data/waitingLists/{docId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+        allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+        // Updates not allowed
+      }
+
+      // 🔹 Matches
+      match /public/data/matches/{matchId} {
+        allow read: if true;
+        allow create: if false; // only via callable function or admin server-side
+        allow update: if isSignedIn() && (isAdmin(appId) || isMatchConfirmingPlayer());
+        allow delete: if isAdmin(appId);
+      }
+
+      // 🔹 Private User Data
       match /users/{userId}/profile/data {
-        // Allow creation IF the document ID matches the firebaseAuthUid being written into the document.
-        // This allows initial creation even if request.auth is momentarily null (race condition fix).
         allow create: if request.resource.data.firebaseAuthUid == userId;
 
-        // Allow read, update, delete only to the owner of the profile OR an admin
-        allow read, update, delete: if request.auth != null && (
-            request.auth.uid == userId || get(/databases/$(database)/documents/artifacts/$(appId)/public/data/users/$(request.auth.uid)).data.role == 'admin'
-        );
-        // Additional specific update rule for fcmToken by the owner.
-        allow update: if request.auth != null && request.auth.uid == userId
-                        && request.resource.data.fcmToken is string;
+        allow read, update, delete: if isSignedIn() &&
+          (request.auth.uid == userId || isAdmin(appId));
       }
 
-    } // End of match /artifacts/{appId}
+      // 🔹 FCM Tokens
+      match /users/{userId}/fcmTokens/{fcmTokenId} {
+        allow read, write: if isSignedIn() && request.auth.uid == userId;
+      }
+    }
 
-    // Default deny rule for all other documents - good practice
+    // 🔒 Catch-all Deny Rule
     match /{document=**} {
-      allow read, write: if false; // This will now be hit ONLY if a truly unhandled path is accessed.
+      allow read, write: if false;
     }
   }
 }

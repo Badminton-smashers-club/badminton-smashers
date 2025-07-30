@@ -4,6 +4,7 @@ import React, { useState, useEffect, createContext, useMemo, useContext } from '
 import { initializeApp } from 'firebase/app';
 import { getAuth, onAuthStateChanged, signOut, connectAuthEmulator } from 'firebase/auth'; 
 import { getFirestore, doc, getDoc, connectFirestoreEmulator } from 'firebase/firestore'; 
+import { getFunctions, connectFunctionsEmulator } from 'firebase/functions'; // <-- ADD THIS LINE
 import { Home, User, LogIn, Calendar, Trophy, DollarSign, Users, PlusCircle, CheckCircle, XCircle, Bell, Settings, LogOut, Edit, Clock, List, TrendingUp, Info } from 'lucide-react';
 
 // Import your page components (ensure these files exist in src/pages/)
@@ -31,6 +32,7 @@ const App = () => {
   const [isAuthReady, setIsAuthReady] = useState(false); // Indicates auth state has been checked
   const [isDbReady, setIsDbReady] = useState(false); // Indicates db is connected
   const [firebaseAppInstance, setFirebaseAppInstance] = useState(null); // <--- ADD THIS LINE
+  const [functions, setFunctions] = useState(null); // <-- ADD THIS LINE
 
   // [NEW] Add userData state here
   const [userData, setUserData] = useState(null); // To store the full user profile data
@@ -62,12 +64,12 @@ const App = () => {
       const app = initializeApp(firebaseConfig);
       const authInstance = getAuth(app);
       const dbInstance = getFirestore(app);
+      const functionsInstance = getFunctions(app); // <-- GET FUNCTIONS INSTANCE
 
-      
-      // Connect to Firebase emulators if running locally
       if (useEmulators) {
         connectAuthEmulator(authInstance, "http://127.0.0.1:9099");
         connectFirestoreEmulator(dbInstance, "127.0.0.1", 8080);
+        connectFunctionsEmulator(functionsInstance, "127.0.0.1", 5001); // <-- CONNECT FUNCTIONS EMULATOR
         console.log("Connected to Firebase Emulators!");
       } else {
         console.log("Connecting to live Firebase project:", firebaseConfig.projectId);
@@ -75,12 +77,13 @@ const App = () => {
 
       setAuth(authInstance);
       setDb(dbInstance);
-      setFirebaseAppInstance(app); // <--- ADD THIS LINE
+      setFunctions(functionsInstance); // <-- SET FUNCTIONS INSTANCE
+      setFirebaseAppInstance(app);
       setIsDbReady(true);
     } catch (e) {
       console.error("Error initializing Firebase:", e);
     }
-  }, [useEmulators,firebaseConfig]); // Added isLocalEnv to dependencies to re-run if it changes (though unlikely)
+  }, [useEmulators, firebaseConfig]);
 
   // Auth state listener
   useEffect(() => {
@@ -202,7 +205,7 @@ const App = () => {
 
   return (
     <AppContext.Provider value={{
-      db, auth, userId, userRole,
+      db, auth, userId, functions, userRole,
       isAuthenticated, setIsAuthenticated,
       isAuthReady,
       isDbReady,
@@ -283,7 +286,7 @@ const App = () => {
                 case 'adminDashboard':
                   return <AdminDashboard navigate={navigate} />;
                 case 'matchManagement':
-                  return <MatchManagementPage userId={userId} db={db} appId={appId} />;
+                  return <MatchManagementPage/>;
                 case 'leaderboard':
                   return <LeaderboardPage navigate={navigate} appId={appId} db={db} />;
                 case 'login': // If authenticated user somehow lands on login page, redirect to home/dashboard

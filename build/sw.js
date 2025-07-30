@@ -6,16 +6,17 @@ const urlsToCache = [
   '/manifest.json',
   '/logo192.png',
   '/logo512.png',
-  // Add other essential assets here (e.g., your bundled JS/CSS files once built)
+  '/static/js/bundle.js',
+  '/static/css/main.css'
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => {
-        console.log('Opened cache');
-        return cache.addAll(urlsToCache);
-      })
+      caches.open(CACHE_NAME)
+          .then((cache) => {
+              console.log('Opened cache');
+              return cache.addAll(urlsToCache);
+          })
   );
 });
 
@@ -49,28 +50,19 @@ self.addEventListener('activate', (event) => {
 
 // --- Placeholder for Push Notification Logic ---
 self.addEventListener('push', function(event) {
-  const data = event.data.json();
-  console.log('Push received:', data);
-
+  let data;
+  try {
+      data = event.data.json();
+  } catch (e) {
+      console.error('Invalid push data:', e);
+      data = { title: 'Error', body: 'Notification data invalid.' };
+  }
   const title = data.title || 'Smashers Badminton Notification';
   const options = {
-    body: data.body || 'You have a new update!',
-    icon: '/logo192.png', // Or a specific notification icon
-    badge: '/logo192.png', // Badge for Android
-    data: {
-      url: data.url || '/' // URL to open when notification is clicked
-    }
+      body: data.body || 'You have a new update!',
+      icon: '/logo192.png',
+      badge: '/logo192.png',
+      data: { url: data.url || '/' }
   };
-
-  event.waitUntil(
-    self.registration.showNotification(title, options)
-  );
-});
-
-self.addEventListener('notificationclick', function(event) {
-  event.notification.close(); // Close the notification
-
-  event.waitUntil(
-    clients.openWindow(event.notification.data.url) // Open the URL specified in the notification
-  );
+  event.waitUntil(self.registration.showNotification(title, options));
 });

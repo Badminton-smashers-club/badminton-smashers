@@ -3,10 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/material": "^7.2.0",
+    "@mui/x-date-pickers": "^8.9.0",
+    "date-fns": "^4.1.0",
+    "dotenv": "^17.2.1",
     "firebase": "^10.7.1",
-    "lucide-react": "^0.303.0"
+    "lucide-react": "^0.303.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
   },
   "devDependencies": {
     "react-scripts": "^5.0.1"
@@ -16,11 +22,9 @@
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
-
     "build:dev": "REACT_APP_ENV=test react-scripts build",
     "deploy:dev": "npm run build:dev && firebase deploy --project your-dev-test-project-id",
     "deploy:prod": "npm run build && firebase deploy --project your-prod-project-id"
-
   },
   "eslintConfig": {
     "extends": [

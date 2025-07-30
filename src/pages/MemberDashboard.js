@@ -1,46 +1,51 @@
-import React, { useState, useEffect, useContext } from 'react';
-import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, addDoc, getDocs, deleteDoc, arrayUnion, arrayRemove } from 'firebase/firestore';
-import { Home, User, LogIn, Calendar, Trophy, DollarSign, Users, PlusCircle, CheckCircle, XCircle, Bell, Settings, LogOut, Edit, Clock, List, TrendingUp, Info } from 'lucide-react';
-import CustomAlertDialog from '../components/CustomAlertDialog'; // Adjust the path if necessary
-import { AppContext } from '../App'; // Import AppContext
+import React, { useState, useEffect, useContext, useCallback } from 'react';
+import { 
+    doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, getDocs, deleteDoc, addDoc 
+} from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
+import { 
+    Trophy, DollarSign, Info, PlusCircle, Calendar, Edit, XCircle, Bell, List
+} from 'lucide-react';
+import CustomAlertDialog from '../components/CustomAlertDialog';
+import { AppContext } from '../App';
+import { formatSlotDateTime } from '../utils/datehelpers';
+import { getMemberName } from '../utils/memberhelpers';
 
 const MemberDashboard = () => {
-    // Consume necessary states from AppContext, including userData and setUserData
-    const { db, auth, userId, isAuthenticated, isAuthReady, appId, userData, setUserData } = useContext(AppContext);
+    const { db, userId, isAuthenticated, isAuthReady, appId, userData, setUserData, functions } = useContext(AppContext);
 
-    // Initialize states using userData from context
     const [balance, setBalance] = useState(userData?.balance || 0);
     const [scores, setScores] = useState(userData?.scores || []);
     const [eloRating, setEloRating] = useState(userData?.eloRating || 1000);
-    const [slots, setSlots] = useState([]); // All available slots
-    const [myBookedSlots, setMyBookedSlots] = useState([]); // Slots booked by this user
+    const [hasMadeFirstBooking, setHasMadeFirstBooking] = useState(userData?.hasMadeFirstBooking || false);
+    const [myBookedSlots, setMyBookedSlots] = useState([]);
+    const [slots, setSlots] = useState([]);
+    const [matches, setMatches] = useState([]);
+    const [appSettings, setAppSettings] = useState(null);
     const [message, setMessage] = useState('');
     const [showBookingModal, setShowBookingModal] = useState(false);
+    const [selectedSlotForBooking, setSelectedSlotForBooking] = useState(null);
     const [showEditProfileModal, setShowEditProfileModal] = useState(false);
     const [newUserName, setNewUserName] = useState(userData?.name || '');
-    // const [showPreBookingModal, setShowPreBookingModal] = useState(false); // Kept commented as in original
-    // const [preBookDate, setPreBookDate] = useState(''); // Kept commented as in original
-    // const [preBookTime, setPreBookTime] = useState(''); // Kept commented as in original
-    // const [showWaitingListModal, setShowWaitingListModal] = useState(false); // Kept commented as in original
-    // const [selectedWaitingSlot, setSelectedWaitingSlot] = useState(null); // Kept commented as in original
     const [waitingListMessages, setWaitingListMessages] = useState([]);
     const [showAlert, setShowAlert] = useState(false);
     const [alertMessage, setAlertMessage] = useState('');
-    const [hasMadeFirstBooking, setHasMadeFirstBooking] = useState(userData?.hasMadeFirstBooking || false);
-    const [allMembers, setAllMembers] = useState([]); // New state to hold all members for match display
-    const [matches, setMatches] = useState([]); // New state to hold user's matches
-    const [filteredSlots, setFilteredSlots] = useState([]); // To store only available slots for display
-    const [availableSlotCount, setAvailableSlotCount] = useState(0); // Count of currently displayed available slots
-    const [topUpLink, setTopUpLink] = useState('');
-    const [lastTopUpTimestamp, setLastTopUpTimestamp] = useState(null); // Firestore Timestamp object or null
-    const appSettingsDocId = 'appConfig'; // Fixed ID for your app settings document, MUST match AdminDashboard
-    const [appSettings, setAppSettings] = useState(null); // Ensure this state exists
     const [alertDialogOnConfirm, setAlertDialogOnConfirm] = useState(null);
     const [alertDialogOnCancel, setAlertDialogOnCancel] = useState(null);
-    const [selectedSlotForBooking, setSelectedSlotForBooking] = useState(null); // To hold the slot object when booking
 
+    const [loadingDashboard, setLoadingDashboard] = useState(true);
+    const [isBookingSlot, setIsBookingSlot] = useState(false);
+    const [isCancellingBooking, setIsCancellingBooking] = useState(false);
+    const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
+    const [isToppingUp, setIsToppingUp] = useState(false);
 
-    // NEW STATES FOR ROLE CHECK
+    const [topUpLink, setTopUpLink] = useState('');
+    const [lastTopUpTimestamp, setLastTopUpTimestamp] = useState(null);
+    const [allMembers, setAllMembers] = useState([]);
+    const [filteredSlots, setFilteredSlots] = useState([]);
+    const [availableSlotCount, setAvailableSlotCount] = useState(0);
+
+    const appSettingsDocId = 'settings'; 
     const [currentUserRole, setCurrentUserRole] = useState(null);
     const [loadingRole, setLoadingRole] = useState(true);
 
@@ -57,11 +62,11 @@ const MemberDashboard = () => {
         }
     };
 
-    // Helper function to group slots by date
+    // Helper function to group slots by date (not currently used in rendering, but kept for potential future use)
     const groupSlotsByDate = (slotsArray) => {
         const grouped = {};
         slotsArray.forEach(slot => {
-            const date = formatSlotDateTime(slot.dateTime, 'date');
+            const date = formatSlotDateTime(slot.timestamp, 'date');
             if (!grouped[date]) {
                 grouped[date] = [];
             }
@@ -70,35 +75,12 @@ const MemberDashboard = () => {
         return grouped;
     };
   
-    // Helper function to safely format slot date and time
-    const formatSlotDateTime = (dateTimeString, type = 'date') => {
-        if (!dateTimeString) {
-            return 'N/A';
-        }
-        const dateObj = new Date(dateTimeString);
-        
-        if (isNaN(dateObj.getTime())) {
-            console.error("Invalid dateTime string encountered:", dateTimeString);
-            return 'Invalid Date';
-        }
-
-        if (type === 'date') {
-            return dateObj.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-        } else if (type === 'time') {
-            return dateObj.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-        } else if (type === 'full') {
-            return dateObj.toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' });
-        }
-        return 'N/A';
-    };
-
-    // EFFECT 1: Fetch Current User's Role (for admin check)
+    // EFFECT 1: Fetch Current User's Role (for admin check in dummy slot setup)
     useEffect(() => {
         const fetchUserRole = async () => {
             if (db && userId && isAuthenticated) {
                 try {
                     setLoadingRole(true);
-                    // Fetch role from the public user document, consistent with security rules
                     const userPublicDocRef = doc(db, `artifacts/${appId}/public/data/users/${userId}`);
                     const userDocSnap = await getDoc(userPublicDocRef);
 
@@ -115,44 +97,22 @@ const MemberDashboard = () => {
                     setLoadingRole(false);
                 }
             } else if (isAuthReady && !isAuthenticated) {
-                // If auth is ready but not authenticated, user is guest, role is null
                 setCurrentUserRole(null);
                 setLoadingRole(false);
             }
         };
 
         fetchUserRole();
-    }, [db, userId, appId, isAuthenticated, isAuthReady]); // Dependencies for role fetching
-
-    useEffect(() => {
-        if (!db || !appId) return;
-    
-        const appSettingsRef = doc(db, 'artifacts', appId, 'public', 'data', appSettingsDocId);
-        const unsubscribeAppSettings = onSnapshot(appSettingsRef, (docSnap) => {
-          if (docSnap.exists()) {
-            const settingsData = docSnap.data();
-            setAppSettings(settingsData); // Set the entire appSettings object
-            setTopUpLink(settingsData.topUpLink || '');
-          } else {
-            console.log("No app settings document found!");
-            setAppSettings(null);
-          }
-        }, (error) => {
-          console.error("Error fetching app settings:", error);
-          setShowAlert(true);
-          setAlertMessage(`Error fetching app settings: ${error.message}`);
-        });
-    
-        return () => unsubscribeAppSettings();
-      }, [db, appId, setShowAlert, setAlertMessage]);
+    }, [db, userId, appId, isAuthenticated, isAuthReady]);
 
     // EFFECT 2: Main data fetching and subscriptions
     useEffect(() => {
-        if (!db || !userId || !isAuthenticated || !isAuthReady) {
-            console.log("MemberDashboard useEffect: Not ready to fetch data.", { db, userId, isAuthenticated, isAuthReady });
+        if (!db || !userId || !isAuthenticated || !isAuthReady || !appId || !functions) {
+            console.log("MemberDashboard useEffect: Not ready to fetch data.", { db, userId, isAuthenticated, isAuthReady, appId, functions });
             return;
         }
         console.log("MemberDashboard useEffect: Authenticated and ready. Fetching data...");
+        setLoadingDashboard(true);
   
         // 1. Listen for user private profile data
         const userProfileRef = doc(db, `artifacts/${appId}/users/${userId}/profile/data`);
@@ -165,7 +125,7 @@ const MemberDashboard = () => {
                 setEloRating(data.eloRating || 1000);
                 setNewUserName(data.name || '');
                 setHasMadeFirstBooking(data.hasMadeFirstBooking || false);
-                setLastTopUpTimestamp(data.lastTopUpTimestamp || null); // Fetch lastTopUpTimestamp
+                setLastTopUpTimestamp(data.lastTopUpTimestamp || null);
             } else {
                 console.log("MemberDashboard: User private profile does not exist or not found after auth.");
                 setUserData(null);
@@ -179,29 +139,30 @@ const MemberDashboard = () => {
 
             setSlots(allFetchedSlots); // Update main 'slots' state with ALL slots
 
-            // Sort ALL fetched slots by dateTime for consistent grouping and display order
-            allFetchedSlots.sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
+            // Sort ALL fetched slots by timestamp for consistent grouping and display order
+            allFetchedSlots.sort((a, b) => (a.timestamp?.toDate() || new Date(0)) - (b.timestamp?.toDate() || new Date(0)));
 
-            // filteredSlots now holds ALL slots, not just available ones (used for modal display)
-            setFilteredSlots(allFetchedSlots);
-            // availableSlotCount will still count only truly available slots for the general display
-            setAvailableSlotCount(allFetchedSlots.filter(slot => !slot.isBooked).length);
+            setFilteredSlots(allFetchedSlots); // filteredSlots now holds ALL slots
+            setAvailableSlotCount(allFetchedSlots.filter(slot => !slot.isBooked && (slot.timestamp?.toDate() || new Date()) >= new Date()).length); // Count only future available slots
 
             // Set slots booked by the current user
-            setMyBookedSlots(allFetchedSlots.filter(slot => slot.bookedBy === userId));
+            setMyBookedSlots(allFetchedSlots.filter(slot => 
+                slot.bookedBy === userId && slot.isBooked && (slot.timestamp?.toDate() || new Date()) >= new Date() // Only future/current booked slots
+            ).sort((a,b) => (a.timestamp?.toDate() || new Date(0)) - (b.timestamp?.toDate() || new Date(0))));
         }, (error) => console.error("Error fetching slots:", error));
 
         // 3. Listen for waiting list notifications specific to this user
         const waitingListRef = collection(db, `artifacts/${appId}/public/data/waitingLists`);
-        const unsubscribeWaitingList = onSnapshot(waitingListRef, (snapshot) => {
-            const messages = [];
-            snapshot.docs.forEach(docSnap => {
+        const q = query(waitingListRef, where("users", "array-contains", userId));
+        const unsubscribeWaitingList = onSnapshot(q, (snapshot) => {
+            const messages = snapshot.docs.map(docSnap => {
                 const data = docSnap.data();
-                // Check if the current user is the first one on the waiting list and slot is available
+                // Check if the current user is the first in line and the slot is available
                 if (data.users && data.users[0] === userId && data.slotAvailable) {
-                    messages.push(`Slot on ${data.date} at ${data.time} is now available!`);
+                    return `Slot on ${formatSlotDateTime(data.date, 'date')} at ${data.time} is now available!`;
                 }
-            });
+                return null; // Don't include if not the first or not available
+            }).filter(Boolean); // Filter out nulls
             setWaitingListMessages(messages);
         }, (error) => console.error("Error fetching waiting list:", error));
   
@@ -214,36 +175,66 @@ const MemberDashboard = () => {
   
         // 5. Listen for user's matches
         const matchesRef = collection(db, `artifacts/${appId}/public/data/matches`);
-        const q = query(matchesRef, where('players', 'array-contains', userId));
-        const unsubscribeMatches = onSnapshot(q, (snapshot) => {
-            const fetchedMatches = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setMatches(fetchedMatches.sort((a, b) => new Date(b.date + 'T' + b.time) - new Date(a.date + 'T' + a.time)));
-        }, (error) => console.error("Error fetching matches:", error));
+        // Use a single query with OR if possible, or combine results from two queries
+        // Firestore does not directly support OR queries across different fields or array-contains with OR.
+        // So, fetching two queries and combining is the correct approach.
+        const qMatchesTeam1 = query(matchesRef, where('team1', 'array-contains', userId));
+        const qMatchesTeam2 = query(matchesRef, where('team2', 'array-contains', userId));
+
+        const unsubscribeMatchesTeam1 = onSnapshot(qMatchesTeam1, (snapshot1) => {
+            const fetchedMatches1 = snapshot1.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            const unsubscribeMatchesTeam2 = onSnapshot(qMatchesTeam2, (snapshot2) => {
+                const fetchedMatches2 = snapshot2.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                // Combine and remove duplicates
+                const combinedMatches = [...fetchedMatches1, ...fetchedMatches2];
+                const uniqueMatches = Array.from(new Map(combinedMatches.map(match => [match.id, match])).values());
+
+                setMatches(uniqueMatches.sort((a, b) => {
+                    const dateA = a.slotTimestamp?.toDate() || new Date(0);
+                    const dateB = b.slotTimestamp?.toDate() || new Date(0);
+                    return dateB.getTime() - dateA.getTime(); // Newest first
+                }));
+                setLoadingDashboard(false);
+            }, (error) => {
+                console.error("Error fetching matches (team2):", error);
+                setAlertMessage(`Error fetching matches: ${error.message}`);
+                setShowAlert(true);
+                setLoadingDashboard(false);
+            });
+            return unsubscribeMatchesTeam2; // Return the unsubscribe function for the inner snapshot
+        }, (error) => {
+            console.error("Error fetching matches (team1):", error);
+            setAlertMessage(`Error fetching matches: ${error.message}`);
+            setShowAlert(true);
+            setLoadingDashboard(false);
+        });
+
 
         // 6. Listen for app settings (e.g., top-up link)
-        const appSettingsRef = doc(db, `artifacts/${appId}/public/data/appSettings`, appSettingsDocId);
+        const appSettingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'appSettings', appSettingsDocId);
         const unsubscribeAppSettings = onSnapshot(appSettingsRef, (docSnap) => {
             if (docSnap.exists()) {
+                setAppSettings(docSnap.data());
                 setTopUpLink(docSnap.data().topUpLink || '');
             } else {
+                console.warn("App settings document not found.");
+                setAppSettings({});
                 setTopUpLink('');
             }
         }, (error) => console.error("Error fetching member app settings:", error));
 
-        // Cleanup function for all listeners
         return () => {
             unsubscribeProfile();
             unsubscribeSlots();
             unsubscribeWaitingList();
             unsubscribeMembers();
-            unsubscribeMatches();
+            unsubscribeMatchesTeam1(); // Unsubscribe the outer snapshot
             unsubscribeAppSettings();
         };
-    }, [db, userId, appId, isAuthenticated, isAuthReady, setUserData]); // Dependencies for main data fetching
+    }, [db, userId, appId, isAuthenticated, isAuthReady, setUserData, functions]);
 
     // EFFECT 3: Call setupDummySlots if admin and data is ready
     useEffect(() => {
-        // Ensure db is ready, user is authenticated, role has been loaded, and user is an admin
         if (db && userId && !loadingRole && currentUserRole === 'admin') {
             console.log("Attempting to setup dummy slots as admin...");
             const setupDummySlots = async () => {
@@ -252,12 +243,13 @@ const MemberDashboard = () => {
                     const existingSlots = await getDocs(slotsCollectionRef);
                     if (existingSlots.empty) {
                         console.log("Setting up dummy slots...");
-                        await addDoc(slotsCollectionRef, { dateTime: '2025-08-01T10:00:00.000Z', isBooked: false, bookedBy: null });
-                        await addDoc(slotsCollectionRef, { dateTime: '2025-08-01T11:00:00.000Z', isBooked: false, bookedBy: null });
-                        await addDoc(slotsCollectionRef, { dateTime: '2025-08-02T09:00:00.000Z', isBooked: false, bookedBy: null });
-                        await addDoc(slotsCollectionRef, { dateTime: '2025-08-02T10:00:00.000Z', isBooked: false, bookedBy: null });
-                        await addDoc(slotsCollectionRef, { dateTime: '2025-08-08T18:00:00.000Z', isBooked: false, bookedBy: null });
-                        await addDoc(slotsCollectionRef, { dateTime: '2025-08-09T19:00:00.000Z', isBooked: false, bookedBy: null });
+                        // Use Firestore Timestamps for consistency
+                        await addDoc(slotsCollectionRef, { timestamp: new Date('2025-08-01T10:00:00Z'), time: '10:00', isBooked: false, bookedBy: null, available: true });
+                        await addDoc(slotsCollectionRef, { timestamp: new Date('2025-08-01T11:00:00Z'), time: '11:00', isBooked: false, bookedBy: null, available: true });
+                        await addDoc(slotsCollectionRef, { timestamp: new Date('2025-08-02T09:00:00Z'), time: '09:00', isBooked: false, bookedBy: null, available: true });
+                        await addDoc(slotsCollectionRef, { timestamp: new Date('2025-08-02T10:00:00Z'), time: '10:00', isBooked: false, bookedBy: null, available: true });
+                        await addDoc(slotsCollectionRef, { timestamp: new Date('2025-08-08T18:00:00Z'), time: '18:00', isBooked: false, bookedBy: null, available: true });
+                        await addDoc(slotsCollectionRef, { timestamp: new Date('2025-08-09T19:00:00Z'), time: '19:00', isBooked: false, bookedBy: null, available: true });
                         console.log("Dummy slots setup complete.");
                     } else {
                         console.log("Dummy slots already exist. Skipping setup.");
@@ -270,188 +262,165 @@ const MemberDashboard = () => {
         } else if (!loadingRole && currentUserRole !== 'admin') {
             console.log("User is not an admin or role not yet determined, skipping dummy slot setup.");
         }
-    }, [db, userId, appId, loadingRole, currentUserRole]); // Dependencies for dummy slots setup
+    }, [db, userId, appId, loadingRole, currentUserRole]);
 
-    const handleInitiateTopUp = async () => {
+
+    // --- Event Handlers ---
+
+    const handleBookSlot = async (slotId, slotDateTimeInput) => {
         setMessage('');
         setAlertMessage('');
-        if (!topUpLink) {
-            setAlertMessage('No top-up link is configured by the admin yet.');
-            setShowAlert(true);
-            return;
-        }
+        if (!db || !userId || !functions || !appSettings) return;
 
-        window.open(topUpLink, '_blank');
+        const slotCost = appSettings.slotBookingCost || 4;
 
-        try {
-            if (userId) {
-                const userProfileRef = doc(db, `artifacts/${appId}/users/${userId}/profile/data`);
-                await updateDoc(userProfileRef, {
-                    lastTopUpTimestamp: new Date(),
-                });
-                setMessage('Redirecting to top-up page. Your top-up period has been reset.');
-            }
-        } catch (error) {
-            console.error("Error updating last top-up timestamp:", error);
-            setAlertMessage('Failed to record top-up attempt. Please try again.');
-            setShowAlert(true);
-        }
-    };
-
-    const handleBookSlot = async (slot) => { // This is your actual function for booking
-        setSelectedSlotForBooking(slot);
-        // Use the fetched slotBookingCost, default to 4 if appSettings or slotBookingCost is not yet available
-        const slotCost = appSettings?.slotBookingCost || 4;
-    
         setAlertMessage(
-            `Confirm booking for ${formatSlotDateTime(slot.dateTime, 'date')} at ${formatSlotDateTime(slot.dateTime, 'time')}? ` +
+            `Confirm booking for ${formatSlotDateTime(slotDateTimeInput, 'date')} at ${formatSlotDateTime(slotDateTimeInput, 'time', new Date(slotDateTimeInput).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }))}? ` +
             `A fee of ${slotCost} EUR will be deducted from your balance.`
         );
         setShowAlert(true);
         setAlertDialogOnConfirm(() => async () => {
             setShowAlert(false);
+            setIsBookingSlot(true);
             try {
-                // Your existing logic for updating the slot
-                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'slots', slot.id), {
-                    bookedPlayers: arrayUnion(userId),
-                    waitingList: arrayRemove(userId), // Assuming you remove from waiting list on booking
-                });
-                // You will add the balance deduction here in the next step (Cloud Function)
-    
-                setShowAlert(true);
-                setAlertMessage('Slot booked successfully!');
-                setAlertDialogOnConfirm(() => () => setShowAlert(false));
-                setAlertDialogOnCancel(null); // No cancel needed for success message
-    
+                const bookSlotCallable = httpsCallable(functions, 'bookSlot');
+                const result = await bookSlotCallable({ slotId: slotId, appId: appId });
+
+                if (result.data.success) {
+                    setMessage(result.data.message || 'Slot booked successfully!');
+                } else {
+                    setAlertMessage(`Error booking slot: ${result.data.message || 'Unknown error.'}`);
+                    setShowAlert(true);
+                }
             } catch (error) {
                 console.error("Error booking slot:", error);
-                setShowAlert(true);
                 setAlertMessage(`Error booking slot: ${error.message}`);
-                setAlertDialogOnConfirm(() => () => setShowAlert(false));
-                setAlertDialogOnCancel(null);
+                setShowAlert(true);
             } finally {
-                setSelectedSlotForBooking(null);
+                setIsBookingSlot(false); // Reset loading state
+                setAlertDialogOnConfirm(null); // Clear confirm action
+                setAlertDialogOnCancel(null); // Clear cancel action
+                setShowBookingModal(false); // Close booking modal
             }
         });
         setAlertDialogOnCancel(() => () => {
             setShowAlert(false);
             setSelectedSlotForBooking(null);
+            setAlertDialogOnConfirm(null);
+            setAlertDialogOnCancel(null);
         });
     };
-    
 
-    const handleCancelSlot = async (slotId, slotDateTimeStr) => {
+    const handleCancelBooking = async (slotId, slotDateTimeInput) => {
         setMessage('');
         setAlertMessage('');
+        if (!db || !userId || !functions) return;
+
         const confirmed = await new Promise(resolve => {
-            const confirmModal = document.createElement('div');
-            confirmModal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4';
-            confirmModal.innerHTML = `
-                <div class="bg-white p-8 rounded-2xl shadow-2xl max-w-sm w-full space-y-6 text-center">
-                    <h3 class="text-2xl font-bold text-red-700">Confirm Cancellation</h3>
-                    <p class="text-lg text-gray-700">Are you sure you want to cancel the slot on ${formatSlotDateTime(slotDateTimeStr, 'full')}? This will refund your balance.</p>
-                    <div class="flex justify-center space-x-4 mt-6">
-                        <button id="cancelDelete" class="bg-gray-300 text-gray-800 py-2 px-4 rounded-lg shadow-md hover:bg-gray-400 transition duration-200 ease-in-out">Cancel</button>
-                        <button id="confirmDelete" class="bg-red-600 text-white py-2 px-4 rounded-lg shadow-md hover:bg-red-700 transition duration-200 ease-in-out">Confirm</button>
-                    </div>
-                </div>
-            `;
-            document.body.appendChild(confirmModal);
-
-            document.getElementById('cancelDelete').onclick = () => {
-                document.body.removeChild(confirmModal);
-                resolve(false);
-            };
-            document.getElementById('confirmDelete').onclick = () => {
-                document.body.removeChild(confirmModal);
+            setAlertMessage(`Are you sure you want to cancel the slot on ${formatSlotDateTime(slotDateTimeInput, 'full')}?`);
+            setShowAlert(true);
+            setAlertDialogOnConfirm(() => () => {
+                setShowAlert(false);
                 resolve(true);
-            };
+            });
+            setAlertDialogOnCancel(() => () => {
+                setShowAlert(false);
+                resolve(false);
+            });
         });
-
+    
         if (!confirmed) {
             return;
         }
-
+    
+        setIsCancellingBooking(true);
         try {
-            const slotDocRef = doc(db, `artifacts/${appId}/public/data/slots`, slotId);
-            await updateDoc(slotDocRef, {
-                isBooked: false,
-                bookedBy: null,
-                preBooked: false
-            });
+            const cancelSlotCallable = httpsCallable(functions, 'cancelSlot');
+            const result = await cancelSlotCallable({ slotId: slotId, appId: appId });
 
-            // Refund balance to private profile
-            const userProfileRef = doc(db, `artifacts/${appId}/users/${userId}/profile/data`);
-            await updateDoc(userProfileRef, {
-                balance: balance + 10
-            });
-
-            // Refund balance to public user data as well
-            const publicUserDocRef = doc(db, `artifacts/${appId}/public/data/users`, userId);
-            await updateDoc(publicUserDocRef, {
-                balance: balance + 10
-            });
-
-            const slotDate = new Date(slotDateTimeStr).toISOString().split('T')[0];
-            const slotTime = new Date(slotDateTimeStr).toTimeString().split(' ')[0].substring(0, 5);
-            const waitingListDocRef = doc(db, `artifacts/${appId}/public/data/waitingLists`, `${slotDate}_${slotTime}`);
-            const waitingListSnap = await getDoc(waitingListDocRef);
-
-            let cancellationMessage = `Slot on ${formatSlotDateTime(slotDateTimeStr, 'full')} cancelled successfully! 10€ refunded.`;
-
-            if (waitingListSnap.exists()) {
-                const waitingListData = waitingListSnap.data();
-                if (waitingListData.users && waitingListData.users.length > 0) {
-                    const updatedWaitingUsers = waitingListData.users.slice(1);
-                    await updateDoc(waitingListDocRef, { users: updatedWaitingUsers, slotAvailable: true });
-                    cancellationMessage = `Slot on ${formatSlotDateTime(slotDateTimeStr, 'full')} cancelled. Notified next person on waiting list.`;
-                } else {
-                    await deleteDoc(waitingListDocRef);
-                }
+            if (result.data.success) {
+                setMessage(result.data.message || 'Slot cancelled successfully!');
+            } else {
+                setAlertMessage(`Failed to cancel slot: ${result.data.message || 'Unknown error.'}`);
+                setShowAlert(true);
             }
-            setMessage(cancellationMessage);
-
         } catch (error) {
             console.error("Error cancelling slot:", error);
-            setAlertMessage('Failed to cancel slot. Please try again.');
+            setAlertMessage(`Error cancelling slot: ${error.message}`);
             setShowAlert(true);
+        } finally {
+            setIsCancellingBooking(false); // Reset loading state
+            setAlertDialogOnConfirm(null);
+            setAlertDialogOnCancel(null);
         }
     };
 
     const handleUpdateUserName = async () => {
         setMessage('');
         setAlertMessage('');
-        if (!newUserName.trim()) {
+        if (!db || !userId || !newUserName.trim()) {
             setAlertMessage('Name cannot be empty.');
             setShowAlert(true);
             return;
         }
+
+        setIsUpdatingProfile(true);
         try {
-            // Update private profile
             const userProfileRef = doc(db, `artifacts/${appId}/users/${userId}/profile/data`);
-            await updateDoc(userProfileRef, {
-                name: newUserName.trim()
-            });
-    
-            // Update public user data
-            const publicUserDocRef = doc(db, `artifacts/${appId}/public/data/users`, userId);
-            await updateDoc(publicUserDocRef, {
-                name: newUserName.trim()
-            });
-    
-            setMessage('Profile name updated successfully!');
+            await updateDoc(userProfileRef, { name: newUserName });
+
+            const publicUserRef = doc(db, `artifacts/${appId}/public/data/users/${userId}`);
+            await updateDoc(publicUserRef, { name: newUserName });
+
+            setMessage('Profile updated successfully!');
             setShowEditProfileModal(false);
         } catch (error) {
             console.error("Error updating user name:", error);
-            setAlertMessage('Failed to update profile. Please try again.');
+            setAlertMessage(`Failed to update profile: ${error.message}`);
             setShowAlert(true);
+        } finally {
+            setIsUpdatingProfile(false);
         }
     };
-  
-    // handlePreBookSlot commented out as per original file
-    // const handlePreBookSlot = async () => { /* ... */ };
-  
-    const handleJoinWaitingList = async (slotDateTimeStr) => {
+
+    const handleTopUp = async () => {
+        setMessage('');
+        setAlertMessage('');
+        if (!db || !userId || !functions || !appSettings?.topUpPaymentLink) {
+            setAlertMessage("Top-up service not available or app settings missing.");
+            setShowAlert(true);
+            return;
+        }
+
+        setIsToppingUp(true);
+        try {
+            const response = await fetch(appSettings.topUpPaymentLink, { method: 'POST' });
+            
+            if (response.ok) {
+                const amount = 10;
+                const processTopUpCallable = httpsCallable(functions, 'processTopUp');
+                const result = await processTopUpCallable({ userId, appId, amount });
+
+                if(result.data.success) {
+                    setMessage(result.data.message || 'Top-up processed!');
+                } else {
+                    setAlertMessage(result.data.message || 'Top-up failed.');
+                }
+                setShowAlert(true);
+            } else {
+                setAlertMessage('Failed to initiate top-up payment.');
+                setShowAlert(true);
+            }
+        } catch (error) {
+            console.error("Error topping up:", error);
+            setAlertMessage(`Error: ${error.message}`);
+            setShowAlert(true);
+        } finally {
+            setIsToppingUp(false);
+        }
+    };
+
+    const handleJoinWaitingList = async (slotDateTimeInput) => {
         setMessage('');
         setAlertMessage('');
 
@@ -461,8 +430,21 @@ const MemberDashboard = () => {
             return;
         }
 
-        const slotDate = new Date(slotDateTimeStr).toISOString().split('T')[0];
-        const slotTime = new Date(slotDateTimeStr).toTimeString().split(' ')[0].substring(0, 5);
+        let slotDateObj;
+        if (slotDateTimeInput.toDate) {
+            slotDateObj = slotDateTimeInput.toDate();
+        } else if (typeof slotDateTimeInput === 'string' || typeof slotDateTimeInput === 'number') {
+            slotDateObj = new Date(slotDateTimeInput);
+        } else if (slotDateTimeInput instanceof Date) {
+            slotDateObj = slotDateTimeInput;
+        } else {
+            setAlertMessage("Invalid slot date/time provided for waiting list.");
+            setShowAlert(true);
+            return;
+        }
+
+        const slotDate = slotDateObj.toISOString().split('T')[0];
+        const slotTime = slotDateObj.toTimeString().split(' ')[0].substring(0, 5);
         const waitingListId = `${slotDate}_${slotTime}`;
 
         try {
@@ -478,7 +460,7 @@ const MemberDashboard = () => {
                 }
                 await updateDoc(waitingListDocRef, {
                     users: [...(waitingListData.users || []), userId],
-                    slotAvailable: false
+                    slotAvailable: false // This flag should be set by a Cloud Function when a slot becomes available
                 });
             } else {
                 await setDoc(waitingListDocRef, {
@@ -488,7 +470,7 @@ const MemberDashboard = () => {
                     slotAvailable: false
                 });
             }
-            setMessage(`You have joined the waiting list for the slot on ${formatSlotDateTime(slotDateTimeStr, 'full')}.`);
+            setMessage(`You have joined the waiting list for the slot on ${formatSlotDateTime(slotDateTimeInput, 'full')}.`);
         } catch (error) {
             console.error("Error joining waiting list:", error);
             setAlertMessage('Failed to join waiting list. Please try again.');
@@ -496,261 +478,227 @@ const MemberDashboard = () => {
         }
     };
 
-    // Filter for slots that are booked by the current user
-    const cancellableSlots = myBookedSlots.filter(slot => slot.bookedBy === userId);
-    
-    // The `unavailableSlots`, `uniqueUnavailableDates`, `timesForSelectedUnavailableDate` variables
-    // related to a waiting list selection UI that appears to be unused in the current JSX.
-    // Keeping them as per the original for now, but they could be removed if not needed.
-    const unavailableSlots = slots.filter(slot => slot.isBooked); // Changed from !slot.available to slot.isBooked
-    const uniqueUnavailableDates = [...new Set(unavailableSlots.map(slot => formatSlotDateTime(slot.dateTime, 'date')))].sort();
-    const timesForSelectedUnavailableDate = (date) => unavailableSlots.filter(slot => formatSlotDateTime(slot.dateTime, 'date') === date).map(slot => formatSlotDateTime(slot.dateTime, 'time')).sort();
 
-
-    // Display loading state while role is being determined
-    if (loadingRole) {
+    if (!isAuthReady || loadingDashboard || loadingRole) {
         return (
-            <div className="flex items-center justify-center min-h-screen bg-gray-100">
-                <div className="text-center text-gray-700 text-xl">Loading user data...</div>
+            <div className="flex flex-col items-center justify-center min-h-screen text-gray-600">
+                <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-blue-500 mb-4"></div>
+                <p>Loading member dashboard...</p>
+            </div>
+        );
+    }
+
+    if (!isAuthenticated) {
+        return (
+            <div className="text-center text-red-600 p-8">
+                Please log in to view your dashboard.
             </div>
         );
     }
 
     return (
-        <div className="bg-white p-8 rounded-2xl shadow-xl max-w-4xl w-full flex flex-col lg:flex-row gap-8 transform transition-all duration-300 ease-in-out hover:scale-105">
-            {/* Left Section: Balance and Scores */}
-            <div className="flex-1 space-y-6">
-                <h2 className="text-3xl font-bold text-blue-700 mb-4">Member Dashboard</h2>
-                <p className="text-gray-600 text-lg mb-4">Welcome, <span className="font-semibold text-blue-800">{userData?.name || 'Member'}</span>!</p>
-                {/* Display Current User Role for debugging/info */}
-                <p className="text-gray-500 text-sm">Your Role: <span className="font-mono text-xs break-all">{currentUserRole || 'Not Set'}</span></p>
+        <div className="min-h-screen bg-gray-100 p-4 sm:p-6 lg:p-8">
+            <h2 className="text-3xl font-extrabold text-gray-900 text-center mb-8">
+                Member Dashboard
+            </h2>
 
-                {/* Balance */}
-                <div className="bg-blue-50 p-6 rounded-xl shadow-md flex items-center justify-between">
-                    <div className="flex items-center">
-                        <DollarSign className="text-blue-600 mr-3" size={24} />
-                        <span className="text-xl font-semibold text-gray-800">Balance:</span>
-                    </div>
-                    <span className="text-2xl font-bold text-blue-800">{balance}€</span>
+            {message && (
+                <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-lg relative mb-4" role="alert">
+                    <span className="block sm:inline">{message}</span>
+                    <span className="absolute top-0 bottom-0 right-0 px-4 py-3">
+                        <XCircle className="h-6 w-6 text-green-500 cursor-pointer" onClick={() => setMessage('')} />
+                    </span>
                 </div>
-                {/* Top Up Balance Section */}
-                <div className="bg-white p-6 rounded-2xl shadow-xl space-y-4 rounded-xl">
-                    <h3 className="text-2xl font-bold text-gray-800 text-center">Top Up Balance</h3>
-                    <p className="text-center text-gray-600">
-                        Your current balance: <span className="font-bold text-blue-700 text-xl">{balance}€</span>
-                    </p>
-                    {(() => {
-                        const twoWeeksInMs = 14 * 24 * 60 * 60 * 1000;
-                        const canTopUp = !lastTopUpTimestamp || (new Date().getTime() - lastTopUpTimestamp.toDate().getTime() >= twoWeeksInMs);
-                        
-                        const nextTopUpDate = lastTopUpTimestamp 
-                            ? new Date(lastTopUpTimestamp.toDate().getTime() + twoWeeksInMs) 
-                            : null;
+            )}
+            {showAlert && (
+                <CustomAlertDialog
+                    message={alertMessage}
+                    onConfirm={alertDialogOnConfirm || (() => setShowAlert(false))}
+                    onCancel={alertDialogOnCancel || (() => setShowAlert(false))}
+                    confirmText="Ok"
+                    cancelText="Close"
+                    showCancelButton={alertDialogOnCancel !== null}
+                />
+            )}
 
-                        return (
-                            <>
-                                <button
-                                    onClick={handleInitiateTopUp}
-                                    disabled={!canTopUp || !topUpLink}
-                                    className={`w-full py-3 px-6 rounded-xl text-lg font-semibold shadow-lg transition duration-300 ease-in-out transform hover:-translate-y-1
-                                        ${canTopUp && topUpLink
-                                            ? 'bg-yellow-500 text-white hover:bg-yellow-600'
-                                            : 'bg-gray-300 text-gray-600 cursor-not-allowed'
-                                        }`}
-                                >
-                                    <DollarSign className="inline-block mr-2" size={20} />
-                                    {canTopUp ? 'Top Up My Balance Now!' : 'Top Up Available Soon'}
-                                </button>
-                                {!canTopUp && nextTopUpDate && (
-                                    <p className="text-center text-gray-500 text-sm mt-2">
-                                        Next top-up available on: {nextTopUpDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
-                                    </p>
-                                )}
-                                {!topUpLink && (
-                                    <p className="text-center text-red-500 text-sm mt-2">
-                                        Top-up link not configured by admin yet.
-                                    </p>
-                                )}
-                            </>
-                                );
-                            })()}
-                        </div>
-                {/* Elo Rating and Grade */}
-                <div className="bg-yellow-50 p-6 rounded-xl shadow-md flex flex-col space-y-2">
-                    <div className="flex items-center justify-between">
-                        <div className="flex items-center">
-                            <Trophy className="text-yellow-600 mr-3" size={24} />
-                            <span className="text-xl font-semibold text-gray-800">Elo Rating:</span>
-                        </div>
-                        <span className="text-2xl font-bold text-yellow-800">{Math.round(eloRating)}</span>
+            <div className="max-w-4xl mx-auto space-y-8">
+                <div className="bg-white p-6 rounded-2xl shadow-xl flex flex-col sm:flex-row items-center justify-between rounded-xl">
+                    <div className="text-center sm:text-left mb-4 sm:mb-0">
+                        <h3 className="text-2xl font-bold text-gray-800">Welcome, {userData?.name || 'Member'}!</h3>
+                        <p className="text-gray-600">Your current balance: <span className="font-semibold text-blue-600">{balance} €</span></p>
+                        <p className="text-gray-600">Your Elo Rating: <span className="font-semibold text-purple-600">{eloRating}</span></p>
+                        <p className="text-gray-600">Games Played: <span className="font-semibold text-orange-600">{userData?.gamesPlayed || 0}</span></p>
+                        <p className="text-gray-600">Wins: <span className="font-semibold text-green-600">{userData?.wins || 0}</span></p>
+                        <p className="text-gray-600">Losses: <span className="font-semibold text-red-600">{userData?.losses || 0}</span></p>
                     </div>
-                    <div className="flex items-center justify-between mt-2 pt-2 border-t border-yellow-200">
-                        <div className="flex items-center">
-                            <Info className="text-yellow-600 mr-3" size={20} />
-                            <span className="text-lg font-medium text-gray-700">Player Grade:</span>
-                        </div>
-                        <span className="text-xl font-bold text-yellow-700">{getGrade(eloRating)}</span>
+                    <div className="flex flex-col space-y-2">
+                        <button
+                            onClick={() => setShowEditProfileModal(true)}
+                            className="bg-gray-200 text-gray-800 py-2 px-4 rounded-lg shadow-md hover:bg-gray-300 transition duration-200 ease-in-out flex items-center justify-center"
+                            disabled={isUpdatingProfile}
+                        >
+                            <Edit className="mr-2" size={20} /> {isUpdatingProfile ? 'Updating...' : 'Edit Profile'}
+                        </button>
+                        <button
+                            onClick={handleTopUp}
+                            className="bg-purple-600 text-white py-2 px-4 rounded-lg shadow-md hover:bg-purple-700 transition duration-200 ease-in-out flex items-center justify-center"
+                            disabled={isToppingUp}
+                        >
+                            <DollarSign className="mr-2" size={20} /> {isToppingUp ? 'Processing...' : 'Top Up Balance'}
+                        </button>
                     </div>
                 </div>
 
-                {/* Message Display */}
-                {message && (
-                    <p className={`mt-4 text-center ${message.includes('successfully') || message.includes('refunded') ? 'text-green-600' : 'text-red-600'} font-medium`}>
-                        {message}
-                    </p>
-                )}
-
-                {/* Waiting List Notifications */}
                 {waitingListMessages.length > 0 && (
-                    <div className="bg-green-100 border-l-4 border-green-500 text-green-700 p-4 rounded-lg shadow-md mb-4" role="alert">
-                        <p className="font-bold">Notifications:</p>
-                        <ul className="list-disc list-inside">
+                    <div className="bg-blue-50 p-6 rounded-2xl shadow-xl rounded-xl">
+                        <h3 className="text-2xl font-bold text-blue-800 text-center mb-4">Waiting List Updates</h3>
+                        <ul className="list-disc list-inside text-gray-700 space-y-2">
                             {waitingListMessages.map((msg, index) => (
-                                <li key={index}>{msg}</li>
+                                <li key={index} className="flex items-center">
+                                    <Bell className="text-blue-500 mr-2" size={18} /> {msg}
+                                </li>
                             ))}
                         </ul>
                     </div>
                 )}
 
-                {/* Edit Profile Button */}
-                <button
-                    onClick={() => setShowEditProfileModal(true)}
-                    className="w-full flex items-center justify-center bg-gray-200 text-gray-800 py-3 px-6 rounded-xl text-lg font-semibold shadow-md hover:bg-gray-300 transition duration-300 ease-in-out transform hover:-translate-y-1"
-                >
-                    <Edit className="mr-2" size={20} /> Edit Profile
-                </button>
+                <div className="bg-white p-6 rounded-2xl shadow-xl space-y-4 rounded-xl">
+                    <h3 className="text-2xl font-bold text-gray-800 text-center">My Booked Slots</h3>
+                    {myBookedSlots.length > 0 ? (
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full bg-white rounded-lg shadow overflow-hidden">
+                                <thead className="bg-gray-100 text-gray-600 uppercase text-sm leading-normal">
+                                    <tr>
+                                        <th className="py-3 px-6 text-left">Date</th>
+                                        <th className="py-3 px-6 text-left">Time</th>
+                                        <th className="py-3 px-6 text-center">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="text-gray-600 text-sm font-light">
+                                    {myBookedSlots.map(slot => (
+                                        <tr key={slot.id} className="border-b border-gray-200 hover:bg-gray-50">
+                                            <td className="py-3 px-6 text-left whitespace-nowrap">
+                                                {formatSlotDateTime(slot.timestamp, 'date')}
+                                            </td>
+                                            <td className="py-3 px-6 text-left">
+                                                {formatSlotDateTime(slot.timestamp, 'time', slot.time)}
+                                            </td>
+                                            <td className="py-3 px-6 text-center">
+                                                <button
+                                                    onClick={() => handleCancelBooking(slot.id, slot.timestamp?.toDate() || `${slot.date}T${slot.time}:00`)}
+                                                    className="bg-red-500 text-white p-2 rounded-full hover:bg-red-600 transition duration-200 ease-in-out"
+                                                    title="Cancel Booking"
+                                                    disabled={isCancellingBooking}
+                                                >
+                                                    <XCircle size={18} />
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    ) : (
+                        <p className="text-center text-gray-500">You have no upcoming booked slots.</p>
+                    )}
+                </div>
 
-                {/* Book Slot Button */}
-                <button
-                    onClick={() => setShowBookingModal(true)}
-                    className="w-full flex items-center justify-center bg-blue-600 text-white py-3 px-6 rounded-xl text-lg font-semibold shadow-lg hover:bg-blue-700 transition duration-300 ease-in-out transform hover:-translate-y-1"
-                >
-                    <PlusCircle className="mr-2" size={20} /> Book Slot
-                </button>
+                <div className="bg-white p-6 rounded-2xl shadow-xl space-y-4 rounded-xl">
+                    <h3 className="text-2xl font-bold text-gray-800 text-center">Available Slots</h3>
+                    {slots.filter(s => s.available && !s.isBooked && (s.timestamp?.toDate() || new Date()) >= new Date()).length > 0 ? (
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full bg-white rounded-lg shadow overflow-hidden">
+                                <thead className="bg-gray-100 text-gray-600 uppercase text-sm leading-normal">
+                                    <tr>
+                                        <th className="py-3 px-6 text-left">Date</th>
+                                        <th className="py-3 px-6 text-left">Time</th>
+                                        <th className="py-3 px-6 text-center">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="text-gray-600 text-sm font-light">
+                                    {slots.filter(s => s.available && !s.isBooked && (s.timestamp?.toDate() || new Date()) >= new Date()).map(slot => (
+                                        <tr key={slot.id} className="border-b border-gray-200 hover:bg-gray-50">
+                                            <td className="py-3 px-6 text-left whitespace-nowrap">
+                                                {formatSlotDateTime(slot.timestamp, 'date')}
+                                            </td>
+                                            <td className="py-3 px-6 text-left">
+                                                {formatSlotDateTime(slot.timestamp, 'time', slot.time)}
+                                            </td>
+                                            <td className="py-3 px-6 text-center space-x-2">
+                                                <button
+                                                    onClick={() => handleBookSlot(slot.id, slot.timestamp?.toDate() || `${slot.date}T${slot.time}:00`)}
+                                                    className="bg-blue-600 text-white p-2 rounded-full hover:bg-blue-700 transition duration-200 ease-in-out"
+                                                    title="Book Slot"
+                                                    disabled={isBookingSlot}
+                                                >
+                                                    <PlusCircle size={18} />
+                                                </button>
+                                                <button
+                                                    onClick={() => handleJoinWaitingList(slot.timestamp?.toDate() || `${slot.date}T${slot.time}:00`)}
+                                                    className="bg-yellow-500 text-white p-2 rounded-full hover:bg-yellow-600 transition duration-200 ease-in-out"
+                                                    title="Join Waiting List"
+                                                >
+                                                    <List size={18} />
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    ) : (
+                        <p className="text-center text-gray-500">No available slots at the moment.</p>
+                    )}
+                </div>
 
-                {/* Pre-Book Slot Button (Commented out as in original)
-                <button
-                    onClick={() => setShowPreBookingModal(true)}
-                    className="w-full flex items-center justify-center bg-purple-600 text-white py-3 px-6 rounded-xl text-lg font-semibold shadow-lg hover:bg-purple-700 transition duration-300 ease-in-out transform hover:-translate-y-1"
-                >
-                    <Clock className="mr-2" size={20} /> Pre-Book Slot
-                </button> */}
-            </div>
-
-            {/* Right Section: My Booked Slots */}
-            <div className="flex-1 space-y-6">
-                <h3 className="text-2xl font-bold text-blue-700 mb-4">My Booked Slots</h3>
-                {myBookedSlots.length > 0 ? (
-                    <ul className="space-y-4">
-                        {myBookedSlots.map(slot => (
-                            <li key={slot.id} className="bg-white p-4 rounded-xl shadow-md flex items-center justify-between border border-blue-200">
-                                <div>
-                                    <p className="font-semibold text-lg text-gray-800 flex items-center"><Calendar size={18} className="mr-2 text-blue-500" /> {formatSlotDateTime(slot.dateTime, 'full')}</p>
-                                    {slot.preBooked && <span className="text-sm text-purple-600 font-medium ml-6">(Pre-Booked)</span>}
-                                </div>
-                                <button
-                                    onClick={() => handleCancelSlot(slot.id, slot.dateTime)}
-                                    className="bg-red-500 text-white px-3 py-1 rounded-lg shadow-sm hover:bg-red-600 transition duration-200 ease-in-out text-sm"
-                                >
-                                    Cancel
-                                </button>
-                            </li>
-                        ))}
-                    </ul>
-                ) : (
-                    <p className="text-gray-600 text-center py-8 bg-gray-50 rounded-lg">No slots booked yet.</p>
-                )}
-
-                {/* Matches Overview */}
-                <h3 className="text-2xl font-bold text-blue-700 mt-8 mb-4">My Matches</h3>
+                <h3 className="text-2xl font-bold text-gray-800 mt-8 mb-4">My Matches</h3>
                 {matches.length > 0 ? (
                     <ul className="space-y-4">
                         {matches.map(match => {
-                            const team1Names = match.team1.map(uid => allMembers.find(m => m.firebaseAuthUid === uid)?.name || 'Unknown Player').join(' & ');
-                            const team2Names = match.team2.map(uid => allMembers.find(m => m.firebaseAuthUid === uid)?.name || 'Unknown Player').join(' & ');
-                            const userEloChange = match.eloChanges?.find(change => change.userId === userId)?.change || 0;
-                            const eloChangeColor = userEloChange >= 0 ? 'text-green-600' : 'text-red-600';
-                            const eloChangeSign = userEloChange >= 0 ? '+' : '';
+                            // Defensive check for the 'match' object itself
+                            if (!match) {
+                                console.warn("Found a null or undefined match object in the matches array.");
+                                return null; // Skip rendering this entry
+                            }
+                            // Defensive checks for team1 and team2 properties
+                            const team1Names = (match.team1 || []).map(uid => getMemberName(uid, allMembers)).join(' & ');
+                            const team2Names = (match.team2 || []).map(uid => getMemberName(uid, allMembers)).join(' & ');
+                            // console.log("scoredisplay", match);
+                            // const scoreDisplay = (match.scores.team1 !== null && match.scores.team2 !== null) 
+                            //     ? `${match.scores.team1} - ${match.scores.team2}` 
+                            //     : 'N/A';
+                            const statusColor = match.status === 'confirmed' ? 'text-green-600' : 
+                                                match.status === 'pending_score' ? 'text-blue-600' :
+                                                match.status === 'rejected' ? 'text-red-600' : 'text-yellow-600';
 
                             return (
-                                <li key={match.id} className="bg-white p-4 rounded-xl shadow-md border border-green-200">
-                                    <p className="font-semibold text-lg text-gray-800 flex items-center mb-2"><Trophy size={18} className="mr-2 text-green-500" /> Match on {match.date} at {match.time}</p>
+                                <li key={match.id} className="bg-white p-4 rounded-xl shadow-md border border-gray-200">
+                                    <p className="font-semibold text-lg text-gray-800 flex items-center mb-2">
+                                        <Trophy size={18} className="mr-2 text-blue-500" /> Match on {formatSlotDateTime(match.slotTimestamp, 'date', match.slotTime)}
+                                    </p>
                                     <p className="text-gray-700 ml-6 mb-1">
                                         <span className="font-medium">Teams:</span> {team1Names} vs {team2Names}
                                     </p>
-                                    <p className="text-gray-700 ml-6 mb-1">
-                                        <span className="font-medium">Score:</span> {match.score1} - {match.score2}
+                                    {/* <p className="text-gray-700 ml-6 mb-1">
+                                        <span className="font-medium">Score:</span> {scoreDisplay}
+                                    </p> */}
+                                    <p className={`text-gray-700 ml-6 ${statusColor}`}>
+                                        <span className="font-medium">Status:</span> {match.status.replace(/_/g, ' ')}
                                     </p>
-                                    <p className={`text-gray-700 ml-6 ${eloChangeColor}`}>
-                                        <span className="font-medium">Your Elo Change:</span> {eloChangeSign}{userEloChange}
-                                    </p>
+                                    {match.status === 'pending_confirmation' && (
+                                        <p className="text-gray-700 ml-6 text-sm">
+                                            Confirmed by: {(match.confirmedBy || []).map(uid => getMemberName(uid, allMembers)).join(', ')}
+                                        </p>
+                                    )}
                                 </li>
                             );
                         })}
                     </ul>
                 ) : (
-                    <p className="text-gray-600 text-center py-8 bg-gray-50 rounded-lg">No matches played yet.</p>
+                    <p className="text-gray-600 text-center py-8 bg-gray-50 rounded-lg">No matches involving you found yet.</p>
                 )}
             </div>
 
-            {/* Booking Modal */}
-            {showBookingModal && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-white p-8 rounded-2xl shadow-2xl max-w-sm w-full space-y-6 overflow-y-auto max-h-[90vh]">
-                        <h3 className="text-2xl font-bold text-blue-700 text-center mb-4">Book a Slot or Join Waiting List</h3>
-
-                        {filteredSlots.length > 0 ? (
-                            Object.entries(groupSlotsByDate(filteredSlots))
-                                .sort(([dateA], [dateB]) => new Date(dateA) - new Date(dateB))
-                                .map(([date, slotsForDate]) => (
-                                <div key={date} className="mb-6 border border-gray-200 rounded-lg p-4">
-                                    <h4 className="text-xl font-semibold text-gray-700 mb-3 border-b pb-2">
-                                        {formatSlotDateTime(date, 'date')} <span className="text-gray-500 text-base">({slotsForDate.length} slots)</span>
-                                    </h4>
-                                    <ul className="space-y-3">
-                                        {slotsForDate.map(slot => (
-                                            <li key={slot.id} className={`flex items-center justify-between p-4 rounded-lg shadow-sm ${slot.isBooked ? 'bg-red-50' : 'bg-green-50'}`}>
-                                                <span className="text-gray-700 font-medium">
-                                                    {formatSlotDateTime(slot.dateTime, 'time')}
-                                                </span>
-                                                {slot.isBooked ? (
-                                                    <button
-                                                        onClick={() => handleJoinWaitingList(slot.dateTime)}
-                                                        className="bg-orange-500 text-white py-2 px-4 rounded-lg shadow-md hover:bg-orange-600 transition duration-200 ease-in-out"
-                                                    >
-                                                        Join Waiting List
-                                                    </button>
-                                                ) : (
-                                                    <button
-                                                        onClick={() => handleBookSlot(slot.id, slot.dateTime)}
-                                                        className="bg-green-600 text-white py-2 px-4 rounded-lg shadow-md hover:bg-green-700 transition duration-200 ease-in-out"
-                                                    >
-                                                        Book (10€)
-                                                    </button>
-                                                )}
-                                            </li>
-                                        ))}
-                                    </ul>
-                                </div>
-                            ))
-                        ) : (
-                            <p className="text-center text-gray-500">No slots available or booked at the moment.</p>
-                        )}
-                        <div className="flex justify-end space-x-4 mt-6">
-                            <button
-                                onClick={() => setShowBookingModal(false)}
-                                className="bg-gray-300 text-gray-800 py-2 px-4 rounded-lg shadow-md hover:bg-gray-400 transition duration-200 ease-in-out"
-                            >
-                                Close
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-            {/* Pre-Booking Modal (Commented out as in original) */}
-            {/* {showPreBookingModal && ( /* ... */ }
-
-            {/* Edit Profile Modal */}
             {showEditProfileModal && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
                     <div className="bg-white p-8 rounded-2xl shadow-2xl max-w-sm w-full space-y-6">
@@ -776,26 +724,13 @@ const MemberDashboard = () => {
                             <button
                                 onClick={handleUpdateUserName}
                                 className="bg-blue-600 text-white py-2 px-4 rounded-lg shadow-md hover:bg-blue-700 transition duration-200 ease-in-out"
+                                disabled={isUpdatingProfile}
                             >
-                                Save Changes
+                                {isUpdatingProfile ? 'Saving...' : 'Save Changes'}
                             </button>
                         </div>
-                        {message && (
-                            <p className={`mt-4 text-center ${message.includes('success') ? 'text-green-600' : 'text-red-600'} font-medium`}>
-                                {message}
-                            </p>
-                        )}
                     </div>
                 </div>
-            )}
-            {showAlert && (
-                <CustomAlertDialog
-                    message={alertMessage}
-                    onConfirm={() => setShowAlert(false)}
-                    onCancel={() => setShowAlert(false)}
-                    confirmText="Ok"
-                    cancelText="Close"
-                />
             )}
         </div>
     );

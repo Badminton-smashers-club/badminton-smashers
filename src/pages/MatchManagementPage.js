@@ -1,76 +1,66 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { collection, addDoc, doc, updateDoc, onSnapshot, getDoc } from 'firebase/firestore'; // getDoc added
-import { PlusCircle, Users, Trophy, Bell, CheckCircle, Info, XCircle } from 'lucide-react'; // XCircle added
+import React, { useState, useEffect, useCallback, useContext } from 'react';
+import { AppContext } from '../App'; // Assuming AppContext is in App.js
+import { collection, onSnapshot, query, where, getDocs } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions'; // Ensure httpsCallable is imported
+import { PlusCircle, Users, Trophy, Bell, CheckCircle, Info, XCircle } from 'lucide-react';
 import CustomAlertDialog from '../components/CustomAlertDialog';
 import MatchDetailsModal from '../components/MatchDetailsModal';
+import { formatSlotDateTime } from '../utils/datehelpers'; // NEW IMPORT
+import { getMemberName, getMemberUid } from '../utils/memberhelpers'; // NEW IMPORT
+import { isSameDay, startOfDay } from 'date-fns'; // Keep these for local date logic
 
-const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole prop added
+const MatchManagementPage = () => {
+    // Consume from AppContext
+    const { db, functions, appId, userId, userRole } = useContext(AppContext);
+
+    // --- State Variables ---
     const [members, setMembers] = useState([]);
     const [matches, setMatches] = useState([]);
+    const [slots, setSlots] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [message, setMessage] = useState('');
+    const [error, setError] = useState(''); // General error for data fetching
+    const [showAlert, setShowAlert] = useState(false); // For CustomAlertDialog
+    const [alertMessage, setAlertMessage] = useState(''); // Message for CustomAlertDialog
+
     // State for new match form inputs
+    const [selectedMatchDate, setSelectedMatchDate] = useState(null); // Changed to null for DatePicker
+    const [selectedSlotTime, setSelectedSlotTime] = useState(''); // New state for specific slot time
     const [team1Player1Name, setTeam1Player1Name] = useState('');
     const [team1Player2Name, setTeam1Player2Name] = useState('');
     const [team2Player1Name, setTeam2Player1Name] = useState('');
     const [team2Player2Name, setTeam2Player2Name] = useState('');
-    const [scoreTeam1, setScoreTeam1] = useState('');
-    const [scoreTeam2, setScoreTeam2] = useState('');
-    const [message, setMessage] = useState('');
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState('');
-    const [showAlert, setShowAlert] = useState(false);
-    const [alertMessage, setAlertMessage] = useState('');
+    const [gameType, setGameType] = useState('singles'); // 'singles' or 'doubles'
 
-    // New states for match setup by members
-    const [slots, setSlots] = useState([]); // To fetch all slots
-    const [selectedMatchDate, setSelectedMatchDate] = useState(''); // New state for match date
-    const [availablePlayersOnDate, setAvailablePlayersOnDate] = useState([]); // Players available on selected date
+    // States for confirmation modal (for players to confirm match details)
+    const [showConfirmMatchDialog, setShowConfirmMatchDialog] = useState(false); // Renamed from showConfirmModal
+    const [currentMatchToConfirm, setCurrentMatchToConfirm] = useState(null); // Renamed from matchToConfirm
 
-    // States for confirmation modal
-    const [showConfirmModal, setShowConfirmModal] = useState(false);
-    const [matchToConfirm, setMatchToConfirm] = useState(null);
+    // States for score submission modal (for admins to input scores)
+    const [showSubmitScoreDialog, setShowSubmitScoreDialog] = useState(false); // NEW STATE
+    const [currentMatchToScore, setCurrentMatchToScore] = useState(null); // NEW STATE
+    const [scoreTeam1, setScoreTeam1] = useState(''); // NEW STATE
+    const [scoreTeam2, setScoreTeam2] = useState(''); // NEW STATE
 
     // States for match details modal
     const [showMatchDetailsModal, setShowMatchDetailsModal] = useState(false);
     const [selectedMatchForDetails, setSelectedMatchForDetails] = useState(null);
 
-    // Helper function to format date/time consistently
-    const formatSlotDateTime = (dateTimeString, type = 'date') => {
-        if (!dateTimeString) {
-            return 'N/A';
-        }
-        const dateObj = new Date(dateTimeString);
-        if (isNaN(dateObj.getTime())) {
-            console.error("Invalid dateTime string encountered:", dateTimeString);
-            return 'Invalid Date';
-        }
+    // NEW: State for players available on the selected match date (from slots)
+    const [availablePlayersOnDate, setAvailablePlayersOnDate] = useState([]);
+    // NEW: State for available slot times for the selected date (booked by current user)
+    const [availableSlotTimes, setAvailableSlotTimes] = useState([]);
 
-        if (type === 'date') {
-            return dateObj.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-        } else if (type === 'time') {
-            return dateObj.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-        } else if (type === 'full') {
-            return dateObj.toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' });
-        }
-        return 'N/A';
-    };
+    // --- useEffects for Data Fetching ---
 
-    // Memoized getters for member name and UID
-    const getMemberName = useCallback((uid) => {
-        const member = members.find(m => m.firebaseAuthUid === uid);
-        return member ? member.name : 'Unknown Player';
-    }, [members]);
-
-    const getMemberUid = useCallback((name) => {
-        const member = members.find(m => m.name === name);
-        return member ? member.firebaseAuthUid : null;
-    }, [members]);
-
-    // Fetch members, matches, and slots
     useEffect(() => {
-        if (!db) return;
+        if (!db || !appId || !userId || !functions) return; // Ensure functions is ready
 
-        const usersRef = collection(db, `artifacts/${appId}/public/data/users`);
-        const unsubscribeUsers = onSnapshot(usersRef, (snapshot) => {
+        setLoading(true);
+
+        // Fetch members (public profiles)
+        const membersRef = collection(db, `artifacts/${appId}/public/data/users`);
+        const unsubscribeMembers = onSnapshot(membersRef, (snapshot) => {
             const fetchedMembers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             setMembers(fetchedMembers);
         }, (err) => {
@@ -78,13 +68,22 @@ const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole p
             setError("Failed to load members.");
         });
 
+        // Fetch matches
         const matchesRef = collection(db, `artifacts/${appId}/public/data/matches`);
         const unsubscribeMatches = onSnapshot(matchesRef, (snapshot) => {
-            const fetchedMatches = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            const fetchedMatches = snapshot.docs.map(doc => {
+                const data = doc.data();
+                return {
+                    id: doc.id,
+                    ...data,
+                    // Ensure gameType is always a string, defaulting if necessary
+                    gameType: typeof data.gameType === 'string' ? data.gameType : 'singles',
+                };
+            });
             // Sort matches by date (newest first) and then by status (pending for current user first)
             fetchedMatches.sort((a, b) => {
-                const dateA = new Date(a.date);
-                const dateB = new Date(b.date);
+                const dateA = a.slotTimestamp?.toDate() || new Date(0); // Use slotTimestamp
+                const dateB = b.slotTimestamp?.toDate() || new Date(0); // Use slotTimestamp
                 if (dateA.getTime() !== dateB.getTime()) {
                     return dateB.getTime() - dateA.getTime(); // Newest first
                 }
@@ -103,7 +102,7 @@ const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole p
             setLoading(false);
         });
 
-        // NEW: Fetch all slots to filter available players by date
+        // Fetch all slots to filter available players by date
         const slotsRef = collection(db, `artifacts/${appId}/public/data/slots`);
         const unsubscribeSlots = onSnapshot(slotsRef, (snapshot) => {
             const fetchedSlots = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -113,60 +112,78 @@ const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole p
         });
 
         return () => {
-            unsubscribeUsers();
+            unsubscribeMembers();
             unsubscribeMatches();
-            unsubscribeSlots(); // Unsubscribe from slots
+            unsubscribeSlots();
         };
-    }, [db, appId, userId]); // Add userId to dependencies
+    }, [db, appId, userId, functions]); // Add functions to dependencies
 
-    // Effect to determine available players based on selected date and booked slots
+    // Effect to determine available players and slot times based on selected date and booked slots
     useEffect(() => {
         if (!selectedMatchDate || !members.length || !slots.length) {
             setAvailablePlayersOnDate([]);
+            setAvailableSlotTimes([]);
+            return;
+        }
+
+        const selectedDateObj = new Date(selectedMatchDate);
+        if (isNaN(selectedDateObj.getTime())) {
+            setAvailablePlayersOnDate([]);
+            setAvailableSlotTimes([]);
             return;
         }
 
         const bookedUserIdsOnDate = new Set();
-        // Filter slots for the selected date and get unique bookedBy UIDs
-        slots.forEach(slot => {
-            // Compare the date part of the slot's dateTime with the selectedMatchDate
-            const slotDate = new Date(slot.dateTime).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-            const inputDate = new Date(selectedMatchDate).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+        const userBookedTimesOnDate = new Set();
 
-            if (slotDate === inputDate && slot.bookedBy) {
-                bookedUserIdsOnDate.add(slot.bookedBy);
+        slots.forEach(slot => {
+            const slotDateTime = slot.timestamp?.toDate ? slot.timestamp.toDate() : new Date(slot.dateTime);
+            if (isSameDay(slotDateTime, selectedDateObj) && slot.isBooked) {
+                // For available players: collect all UIDs booked on this date
+                if (slot.bookedBy) {
+                    bookedUserIdsOnDate.add(slot.bookedBy);
+                }
+                // For available slot times: collect times booked by the current user
+                if (slot.bookedBy === userId) {
+                    userBookedTimesOnDate.add(slot.time);
+                }
             }
         });
 
         // Filter members based on who has booked a slot on the selected date
-        const players = members.filter(member => bookedUserIdsOnDate.has(member.firebaseAuthUid));
+        const players = members.filter(member => bookedUserIdsOnDate.has(member.id)); // Assuming member.id is firebaseAuthUid
         setAvailablePlayersOnDate(players);
 
-    }, [selectedMatchDate, members, slots]); // Dependencies
+        // Convert set to array and sort times
+        setAvailableSlotTimes(Array.from(userBookedTimesOnDate).sort());
+
+    }, [selectedMatchDate, members, slots, userId]); // Dependencies
+
+    // --- Event Handlers ---
 
     const handleAddMatch = async (e) => {
         e.preventDefault();
         setMessage('');
         setAlertMessage('');
 
-        if (!selectedMatchDate) {
-            setAlertMessage('Please select a match date.');
+        if (!selectedMatchDate || !selectedSlotTime || !team1Player1Name || !team2Player1Name || (gameType === 'doubles' && (!team1Player2Name || !team2Player2Name))) {
+            setAlertMessage('Please fill in all required fields for match creation.');
             setShowAlert(true);
             return;
         }
 
-        const p1T1Uid = getMemberUid(team1Player1Name);
-        const p2T1Uid = team1Player2Name ? getMemberUid(team1Player2Name) : null;
-        const p1T2Uid = getMemberUid(team2Player1Name);
-        const p2T2Uid = team2Player2Name ? getMemberUid(team2Player2Name) : null;
+        // Use imported helper functions
+        const p1T1Uid = getMemberUid(team1Player1Name, members);
+        const p2T1Uid = team1Player2Name ? getMemberUid(team1Player2Name, members) : null;
+        const p1T2Uid = getMemberUid(team2Player1Name, members);
+        const p2T2Uid = team2Player2Name ? getMemberUid(team2Player2Name, members) : null;
 
-        const team1Uids = [p1T1Uid].filter(Boolean); // Filter out null if player not found
+        const team1Uids = [p1T1Uid].filter(Boolean);
         if (p2T1Uid) team1Uids.push(p2T1Uid);
 
         const team2Uids = [p1T2Uid].filter(Boolean);
         if (p2T2Uid) team2Uids.push(p2T2Uid);
 
-        // Validation: Ensure all selected players are valid and unique UIDs
         const allSelectedUids = [...team1Uids, ...team2Uids].filter(Boolean);
         const uniqueUids = new Set(allSelectedUids);
 
@@ -175,122 +192,174 @@ const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole p
             setShowAlert(true);
             return;
         }
-        
-        // Ensure the current user (adder) is part of the match
+
         if (!allSelectedUids.includes(userId)) {
-             setAlertMessage('You must be one of the players in the match you are adding.');
-             setShowAlert(true);
-             return;
-        }
-
-        // Basic score validation
-        if (scoreTeam1 === '' || scoreTeam2 === '') {
-            setAlertMessage('Please enter scores for both teams.');
+            setAlertMessage('You must be one of the players in the match you are creating.');
             setShowAlert(true);
             return;
         }
-        
-        const score1Int = parseInt(scoreTeam1);
-        const score2Int = parseInt(scoreTeam2);
-
-        if (isNaN(score1Int) || isNaN(score2Int) || score1Int < 0 || score2Int < 0) {
-            setAlertMessage('Scores must be non-negative numbers.');
-            setShowAlert(true);
-            return;
-        }
-        
-        // Prevent equal scores (draws) as per Elo system for win/loss
-        if (score1Int === score2Int) {
-            setAlertMessage('Draws are not currently supported. Please enter a winning score for one team.');
-            setShowAlert(true);
-            return;
-        }
-
 
         try {
-            await addDoc(collection(db, `artifacts/${appId}/public/data/matches`), {
-                date: selectedMatchDate, // Use the selected date (YYYY-MM-DD format from input)
+            // Find the specific slot document booked by the current user for the selected date and time
+            const startOfSelectedDay = startOfDay(selectedMatchDate);
+            const slotQueryRef = query(
+                collection(db, `artifacts/${appId}/public/data/slots`),
+                where('timestamp', '==', startOfSelectedDay),
+                where('time', '==', selectedSlotTime),
+                where('bookedBy', '==', userId)
+            );
+            const slotSnapshot = await getDocs(slotQueryRef);
+
+            let slotDocId = null;
+            let existingSlotData = null;
+            if (!slotSnapshot.empty) {
+                slotSnapshot.forEach(doc => {
+                    slotDocId = doc.id;
+                    existingSlotData = doc.data();
+                });
+            }
+
+            if (!slotDocId || !existingSlotData || !existingSlotData.isBooked || existingSlotData.bookedBy !== userId) {
+                setAlertMessage('Selected slot is not booked by you or does not exist. Please book the slot first.');
+                setShowAlert(true);
+                return;
+            }
+
+            const createMatchCallable = httpsCallable(functions, 'createMatch');
+            const result = await createMatchCallable({
+                appId: appId, // Pass appId to callable function
+                slotTimestamp: existingSlotData.timestamp, // Use the timestamp from the slot document
+                slotTime: existingSlotData.time, // Use the time from the slot document
+                gameType: gameType,
                 team1: team1Uids,
                 team2: team2Uids,
-                score1: score1Int,
-                score2: score2Int,
-                addedBy: userId, // Member who added the match
-                status: 'pending_confirmation', // New status for confirmation
-                confirmedBy: [userId], // Member who added automatically confirms their side
-                createdAt: new Date()
             });
-            setMessage('Match added successfully! Awaiting confirmation from the other team.');
-            setSelectedMatchDate(''); // Clear date
-            setTeam1Player1Name('');
-            setTeam1Player2Name('');
-            setTeam2Player1Name('');
-            setTeam2Player2Name('');
-            setScoreTeam1('');
-            setScoreTeam2('');
+
+            if (result.data.success) {
+                setMessage('Match added successfully! Awaiting confirmation from the other team.');
+                setSelectedMatchDate(null);
+                setSelectedSlotTime('');
+                setTeam1Player1Name('');
+                setTeam1Player2Name('');
+                setTeam2Player1Name('');
+                setTeam2Player2Name('');
+                setGameType('singles');
+            } else {
+                setAlertMessage(`Failed to add match: ${result.data.message || 'Unknown error.'}`);
+                setShowAlert(true);
+            }
         } catch (error) {
             console.error("Error adding match:", error);
-            setAlertMessage('Failed to add match. Please try again.');
+            setAlertMessage(`Failed to add match: ${error.message}`);
             setShowAlert(true);
         }
     };
 
-    // Function to handle score confirmation
-    const handleConfirmMatch = useCallback(async (match) => {
+    const handleConfirmMatch = useCallback(async () => {
         setMessage('');
         setAlertMessage('');
 
-        if (!match || !userId) return;
+        if (!currentMatchToConfirm || !userId) return;
 
         try {
-            const matchRef = doc(db, `artifacts/${appId}/public/data/matches`, match.id);
-            const currentMatchSnap = await getDoc(matchRef); // Get latest state
-            if (!currentMatchSnap.exists()) {
-                setAlertMessage('Match no longer exists.');
+            const confirmMatchCallable = httpsCallable(functions, 'confirmMatch');
+            const result = await confirmMatchCallable({ matchId: currentMatchToConfirm.id, appId: appId });
+
+            if (result.data.success) {
+                setMessage(result.data.message || 'Match confirmation submitted!');
+            } else {
+                setAlertMessage(`Failed to confirm match: ${result.data.message || 'Unknown error.'}`);
                 setShowAlert(true);
-                return;
-            }
-            const currentMatchData = currentMatchSnap.data();
-
-            let updatedConfirmedBy = new Set(currentMatchData.confirmedBy || []);
-            updatedConfirmedBy.add(userId);
-
-            let newStatus = currentMatchData.status;
-
-            // Determine if all required players have confirmed
-            const allPlayersInMatch = [...currentMatchData.team1, ...currentMatchData.team2];
-            // Ensure every player in the match is in the updatedConfirmedBy set
-            const hasAllPlayersConfirmed = allPlayersInMatch.every(playerUid => updatedConfirmedBy.has(playerUid));
-
-            // If an admin confirms, it overrides player confirmations
-            if (userRole === 'admin') {
-                newStatus = 'confirmed';
-            } else if (hasAllPlayersConfirmed) {
-                newStatus = 'confirmed';
-            } else {
-                newStatus = 'pending_confirmation';
-            }
-
-            await updateDoc(matchRef, {
-                confirmedBy: Array.from(updatedConfirmedBy), // Convert Set back to Array
-                status: newStatus
-            });
-            
-            setMessage('Match score confirmation submitted!');
-            if (newStatus === 'confirmed') {
-                setMessage('Match confirmed! Elo ratings will update shortly.');
-            } else {
-                setMessage('Your confirmation has been recorded. Awaiting other player(s) confirmation.');
             }
 
         } catch (error) {
             console.error("Error confirming match:", error);
-            setAlertMessage('Failed to confirm match. Please try again.');
+            setAlertMessage(`Error confirming match: ${error.message}`);
             setShowAlert(true);
         } finally {
-            setShowConfirmModal(false);
-            setMatchToConfirm(null);
+            setShowConfirmMatchDialog(false);
+            setCurrentMatchToConfirm(null);
         }
-    }, [db, appId, userId, userRole]); // Add userRole to dependencies
+    }, [appId, userId, functions, currentMatchToConfirm]); // Added currentMatchToConfirm to dependencies
+
+    const handleRejectMatch = useCallback(async () => {
+        setMessage('');
+        setAlertMessage('');
+
+        if (!currentMatchToConfirm || !userId || userRole !== 'admin') return; // Only admin can reject
+
+        try {
+            const rejectMatchCallable = httpsCallable(functions, 'rejectMatch');
+            const result = await rejectMatchCallable({ matchId: currentMatchToConfirm.id, appId: appId });
+
+            if (result.data.success) {
+                setMessage(result.data.message || 'Match rejected successfully.');
+            } else {
+                setAlertMessage(`Failed to reject match: ${result.data.message || 'Unknown error.'}`);
+                setShowAlert(true);
+            }
+        } catch (error) {
+            console.error("Error rejecting match:", error);
+            setAlertMessage(`Error rejecting match: ${error.message}`);
+            setShowAlert(true);
+        } finally {
+            setShowConfirmMatchDialog(false); // Close the dialog after reject
+            setCurrentMatchToConfirm(null);
+        }
+    }, [appId, userId, userRole, functions, currentMatchToConfirm]); // Added currentMatchToConfirm to dependencies
+
+
+    const handleSubmitScore = useCallback(async () => {
+        setMessage('');
+        setAlertMessage('');
+
+        if (!currentMatchToScore || scoreTeam1 === '' || scoreTeam2 === '') {
+            setAlertMessage('Please enter scores for both teams.');
+            setShowAlert(true);
+            return;
+        }
+
+        const s1 = parseInt(scoreTeam1, 10);
+        const s2 = parseInt(scoreTeam2, 10);
+
+        if (isNaN(s1) || isNaN(s2) || s1 < 0 || s2 < 0) {
+            setAlertMessage('Scores must be non-negative numbers.');
+            setShowAlert(true);
+            return;
+        }
+
+        if (s1 === s2) {
+            setAlertMessage('Draws are not allowed. Please enter distinct scores.');
+            setShowAlert(true);
+            return;
+        }
+
+        try {
+            const submitMatchScoreCallable = httpsCallable(functions, 'submitMatchScore');
+            const result = await submitMatchScoreCallable({
+                matchId: currentMatchToScore.id,
+                score1: s1,
+                score2: s2,
+                appId: appId // Pass appId
+            });
+
+            if (result.data.success) {
+                setMessage(result.data.message || 'Scores submitted successfully! Elo ratings will update shortly.');
+            } else {
+                setAlertMessage(`Failed to submit scores: ${result.data.message || 'Unknown error.'}`);
+                setShowAlert(true);
+            }
+        } catch (error) {
+            console.error("Error submitting score:", error);
+            setAlertMessage(`Error submitting score: ${error.message}`);
+            setShowAlert(true);
+        } finally {
+            setShowSubmitScoreDialog(false);
+            setCurrentMatchToScore(null);
+            setScoreTeam1('');
+            setScoreTeam2('');
+        }
+    }, [appId, functions, currentMatchToScore, scoreTeam1, scoreTeam2]); // Added all relevant dependencies
 
 
     if (loading) {
@@ -334,30 +403,62 @@ const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole p
                             <input
                                 type="date"
                                 id="matchDate"
-                                value={selectedMatchDate}
-                                onChange={(e) => setSelectedMatchDate(e.target.value)}
+                                value={selectedMatchDate ? selectedMatchDate.toISOString().split('T')[0] : ''} // Format for input type="date"
+                                onChange={(e) => setSelectedMatchDate(e.target.value ? new Date(e.target.value) : null)}
                                 className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
                                 required
                             />
                         </div>
-                        {selectedMatchDate ? ( // Only show player selection if a date is selected
-                            availablePlayersOnDate.length > 0 ? (
-                                <>
-                                    <div className="grid grid-cols-2 gap-4">
-                                        {/* Team 1 Player 1 */}
-                                        <div>
-                                            <label htmlFor="team1Player1" className="block text-gray-700 text-sm font-bold mb-2">Team 1 Player 1:</label>
-                                            <input
-                                                list="availableMembersList" // Use datalist for suggestions
-                                                id="team1Player1"
-                                                value={team1Player1Name}
-                                                onChange={(e) => setTeam1Player1Name(e.target.value)}
-                                                placeholder="Select player"
-                                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                                                required
-                                            />
-                                        </div>
-                                        {/* Team 1 Player 2 (Optional for doubles) */}
+                        <div>
+                            <label htmlFor="slotTime" className="block text-gray-700 text-sm font-bold mb-2">My Booked Slot Time:</label>
+                            <select
+                                id="slotTime"
+                                value={selectedSlotTime}
+                                onChange={(e) => setSelectedSlotTime(e.target.value)}
+                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                required
+                                disabled={!selectedMatchDate || availableSlotTimes.length === 0}
+                            >
+                                <option value="">Select a time</option>
+                                {availableSlotTimes.map(time => (
+                                    <option key={time} value={time}>{time}</option>
+                                ))}
+                            </select>
+                            {!selectedMatchDate && <p className="text-xs text-gray-500 mt-1">Select a date first.</p>}
+                            {selectedMatchDate && availableSlotTimes.length === 0 && <p className="text-xs text-gray-500 mt-1">No slots booked by you for this date.</p>}
+                        </div>
+                        <div>
+                            <label htmlFor="gameType" className="block text-gray-700 text-sm font-bold mb-2">Game Type:</label>
+                            <select
+                                id="gameType"
+                                value={gameType}
+                                onChange={(e) => setGameType(e.target.value)}
+                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                required
+                            >
+                                <option value="singles">Singles</option>
+                                <option value="doubles">Doubles</option>
+                            </select>
+                        </div>
+
+                        {selectedMatchDate && availablePlayersOnDate.length > 0 ? (
+                            <>
+                                <div className="grid grid-cols-2 gap-4">
+                                    {/* Team 1 Player 1 */}
+                                    <div>
+                                        <label htmlFor="team1Player1" className="block text-gray-700 text-sm font-bold mb-2">Team 1 Player 1:</label>
+                                        <input
+                                            list="availableMembersList" // Use datalist for suggestions
+                                            id="team1Player1"
+                                            value={team1Player1Name}
+                                            onChange={(e) => setTeam1Player1Name(e.target.value)}
+                                            placeholder="Select player"
+                                            className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                            required
+                                        />
+                                    </div>
+                                    {/* Team 1 Player 2 (Optional for doubles) */}
+                                    {gameType === 'doubles' && (
                                         <div>
                                             <label htmlFor="team1Player2" className="block text-gray-700 text-sm font-bold mb-2">Team 1 Player 2 (Optional):</label>
                                             <input
@@ -369,20 +470,22 @@ const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole p
                                                 className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
                                             />
                                         </div>
-                                        {/* Team 2 Player 1 */}
-                                        <div>
-                                            <label htmlFor="team2Player1" className="block text-gray-700 text-sm font-bold mb-2">Team 2 Player 1:</label>
-                                            <input
-                                                list="availableMembersList"
-                                                id="team2Player1"
-                                                value={team2Player1Name}
-                                                onChange={(e) => setTeam2Player1Name(e.target.value)}
-                                                placeholder="Select player"
-                                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                                                required
-                                            />
-                                        </div>
-                                        {/* Team 2 Player 2 (Optional for doubles) */}
+                                    )}
+                                    {/* Team 2 Player 1 */}
+                                    <div>
+                                        <label htmlFor="team2Player1" className="block text-gray-700 text-sm font-bold mb-2">Team 2 Player 1:</label>
+                                        <input
+                                            list="availableMembersList"
+                                            id="team2Player1"
+                                            value={team2Player1Name}
+                                            onChange={(e) => setTeam2Player1Name(e.target.value)}
+                                            placeholder="Select player"
+                                            className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                            required
+                                        />
+                                    </div>
+                                    {/* Team 2 Player 2 (Optional for doubles) */}
+                                    {gameType === 'doubles' && (
                                         <div>
                                             <label htmlFor="team2Player2" className="block text-gray-700 text-sm font-bold mb-2">Team 2 Player 2 (Optional):</label>
                                             <input
@@ -394,45 +497,18 @@ const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole p
                                                 className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
                                             />
                                         </div>
-                                    </div>
+                                    )}
+                                </div>
 
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div>
-                                            <label htmlFor="scoreTeam1" className="block text-gray-700 text-sm font-bold mb-2">Team 1 Score:</label>
-                                            <input
-                                                type="number"
-                                                id="scoreTeam1"
-                                                value={scoreTeam1}
-                                                onChange={(e) => setScoreTeam1(e.target.value)}
-                                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                                                required
-                                                min="0"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label htmlFor="scoreTeam2" className="block text-gray-700 text-sm font-bold mb-2">Team 2 Score:</label>
-                                            <input
-                                                type="number"
-                                                id="scoreTeam2"
-                                                value={scoreTeam2}
-                                                onChange={(e) => setScoreTeam2(e.target.value)}
-                                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                                                required
-                                                min="0"
-                                            />
-                                        </div>
-                                    </div>
+                                {/* Removed score inputs from here, they are submitted separately */}
 
-                                    <button
-                                        type="submit"
-                                        className="w-full bg-blue-600 text-white py-2 px-4 rounded-lg shadow-md hover:bg-blue-700 transition duration-200 ease-in-out"
-                                    >
-                                        <PlusCircle className="inline-block mr-2" size={20} /> Add Match
-                                    </button>
-                                </>
-                            ) : (
-                                <p className="text-center text-gray-500">No players available for the selected date.</p>
-                            )
+                                <button
+                                    type="submit"
+                                    className="w-full bg-blue-600 text-white py-2 px-4 rounded-lg shadow-md hover:bg-blue-700 transition duration-200 ease-in-out"
+                                >
+                                    <PlusCircle className="inline-block mr-2" size={20} /> Create Match
+                                </button>
+                            </>
                         ) : (
                             <p className="text-center text-gray-500">Select a date to see available players.</p>
                         )}
@@ -450,6 +526,7 @@ const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole p
                                 <thead className="bg-gray-100 text-gray-600 uppercase text-sm leading-normal">
                                     <tr>
                                         <th className="py-3 px-6 text-left">Date</th>
+                                        <th className="py-3 px-6 text-left">Type</th> {/* Added Type column */}
                                         <th className="py-3 px-6 text-left">Teams</th>
                                         <th className="py-3 px-6 text-center">Score</th>
                                         <th className="py-3 px-6 text-center">Added By</th>
@@ -463,30 +540,36 @@ const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole p
                                         const isCurrentUserInvolved = match.team1.includes(userId) || match.team2.includes(userId);
                                         // Check if the current user has already confirmed
                                         const currentUserConfirmed = match.confirmedBy && match.confirmedBy.includes(userId);
-                                        // Determine if "Confirm Score" button should be shown
-                                        const showConfirmButton = match.status === 'pending_confirmation' && 
-                                                                (isCurrentUserInvolved && !currentUserConfirmed) || userRole === 'admin';
 
                                         return (
                                             <tr key={match.id} className="border-b border-gray-200 hover:bg-gray-50">
                                                 <td className="py-3 px-6 text-left whitespace-nowrap">
-                                                    {formatSlotDateTime(match.date, 'date')}
+                                                    {formatSlotDateTime(match.slotTimestamp, 'date', match.slotTime)}
+                                                </td>
+                                                <td className="py-3 px-6 text-left whitespace-nowrap">
+                                                    {match.gameType ? (match.gameType.charAt(0).toUpperCase() + match.gameType.slice(1)) : 'N/A'}
                                                 </td>
                                                 <td className="py-3 px-6 text-left">
-                                                    {match.team1.map(getMemberName).join(' & ')} vs {match.team2.map(getMemberName).join(' & ')}
+                                                    {match.team1.map(uid => getMemberName(uid, members)).join(' & ')} vs {match.team2.map(uid => getMemberName(uid, members)).join(' & ')}
                                                 </td>
-                                                <td className="py-3 px-6 text-center">{match.score1} - {match.score2}</td>
-                                                <td className="py-3 px-6 text-center">{getMemberName(match.addedBy)}</td>
+                                                {/* <td className="py-3 px-6 text-center">
+                                                    {match.scores?.team1 !== null && match.scores?.team2 !== null
+                                                        ? `${match.scores.team1} - ${match.scores.team2}`
+                                                        : 'N/A'}
+                                                </td> */}
+                                                <td className="py-3 px-6 text-center">{getMemberName(match.createdBy, members)}</td>
                                                 <td className="py-3 px-6 text-center">
                                                     <span className={`py-1 px-3 rounded-full text-xs font-medium ${
                                                         match.status === 'confirmed' ? 'bg-green-200 text-green-800' :
-                                                        'bg-yellow-200 text-yellow-800'
+                                                        match.status === 'pending_score' ? 'bg-blue-200 text-blue-800' : // New status for scores pending
+                                                        match.status === 'rejected' ? 'bg-red-200 text-red-800' : // New status for rejected
+                                                        'bg-yellow-200 text-yellow-800' // pending_confirmation
                                                     }`}>
                                                         {match.status.replace(/_/g, ' ')}
                                                     </span>
                                                     {match.status === 'pending_confirmation' && (
                                                         <div className="text-xs text-gray-500 mt-1">
-                                                            Confirmed by: {match.confirmedBy.map(getMemberName).join(', ')}
+                                                            Confirmed by: {match.confirmedBy.map(uid => getMemberName(uid, members)).join(', ')}
                                                         </div>
                                                     )}
                                                 </td>
@@ -501,16 +584,45 @@ const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole p
                                                     >
                                                         <Info size={18} />
                                                     </button>
-                                                    {showConfirmButton && (
+                                                    {/* Confirm Match button */}
+                                                    {match.status === 'pending_confirmation' && isCurrentUserInvolved && !currentUserConfirmed && (
                                                         <button
                                                             onClick={() => {
-                                                                setMatchToConfirm(match);
-                                                                setShowConfirmModal(true);
+                                                                setCurrentMatchToConfirm(match);
+                                                                setShowConfirmMatchDialog(true);
                                                             }}
                                                             className="bg-green-500 text-white p-2 rounded-full hover:bg-green-600 transition duration-200 ease-in-out"
-                                                            title={userRole === 'admin' ? "Admin Confirm" : "Confirm Score"}
+                                                            title="Confirm Match"
                                                         >
                                                             <CheckCircle size={18} />
+                                                        </button>
+                                                    )}
+                                                    {/* Submit Score button (Admin only, for matches pending score) */}
+                                                    {userRole === 'admin' && match.status === 'pending_score' && (
+                                                        <button
+                                                            onClick={() => {
+                                                                setCurrentMatchToScore(match);
+                                                                setScoreTeam1(match.scores?.team1 || '');
+                                                                setScoreTeam2(match.scores?.team2 || '');
+                                                                setShowSubmitScoreDialog(true);
+                                                            }}
+                                                            className="bg-blue-500 text-white p-2 rounded-full hover:bg-blue-600 transition duration-200 ease-in-out"
+                                                            title="Submit Score"
+                                                        >
+                                                            <Trophy size={18} />
+                                                        </button>
+                                                    )}
+                                                    {/* Admin Reject button (Admin only, for matches pending confirmation) */}
+                                                    {userRole === 'admin' && match.status === 'pending_confirmation' && (
+                                                        <button
+                                                            onClick={() => {
+                                                                setCurrentMatchToConfirm(match); // Use this to pass match to dialog
+                                                                setShowConfirmMatchDialog(true); // Reuse dialog for admin reject option
+                                                            }}
+                                                            className="bg-red-500 text-white p-2 rounded-full hover:bg-red-600 transition duration-200 ease-in-out"
+                                                            title="Admin Reject"
+                                                        >
+                                                            <XCircle size={18} />
                                                         </button>
                                                     )}
                                                 </td>
@@ -529,19 +641,60 @@ const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole p
             {/* Datalist for available players based on selected date */}
             <datalist id="availableMembersList">
                 {availablePlayersOnDate.map(member => (
-                    <option key={member.firebaseAuthUid} value={member.name}></option>
+                    <option key={member.id} value={member.name}></option>
                 ))}
             </datalist>
 
-            {/* Confirmation Modal */}
-            {showConfirmModal && matchToConfirm && (
+            {/* Confirmation Dialog (for players to confirm/admin to reject) */}
+            {showConfirmMatchDialog && currentMatchToConfirm && (
                 <CustomAlertDialog
-                    title="Confirm Match Score"
-                    message={`Do you want to confirm the score for the match on ${formatSlotDateTime(matchToConfirm.date, 'date')}: ${matchToConfirm.team1.map(getMemberName).join(' & ')} vs ${matchToConfirm.team2.map(getMemberName).join(' & ')}? Score: ${matchToConfirm.score1} - ${matchToConfirm.score2}`}
-                    onConfirm={() => handleConfirmMatch(matchToConfirm)}
-                    onCancel={() => setShowConfirmModal(false)}
-                    confirmText="Confirm"
+                    title="Confirm or Reject Match?"
+                    message={`Match on ${formatSlotDateTime(currentMatchToConfirm.slotTimestamp, 'date', currentMatchToConfirm.slotTime)}: ${currentMatchToConfirm.team1.map(uid => getMemberName(uid, members)).join(' & ')} vs ${currentMatchToConfirm.team2.map(uid => getMemberName(uid, members)).join(' & ')}`}
+                    onConfirm={userRole === 'admin' ? handleRejectMatch : handleConfirmMatch} // Admin can reject, player can confirm
+                    onCancel={() => setShowConfirmMatchDialog(false)}
+                    confirmText={userRole === 'admin' ? "Reject Match" : "Confirm Match"}
                     cancelText="Cancel"
+                    showCancelButton={true} // Always show cancel for this dialog
+                />
+            )}
+
+            {/* Score Submission Dialog (Admin only) */}
+            {showSubmitScoreDialog && currentMatchToScore && (
+                <CustomAlertDialog
+                    title="Submit Match Score"
+                    message={
+                        <>
+                            <p>Enter the final scores for Team 1 and Team 2.</p>
+                            <p className="font-semibold mt-2">Match: {formatSlotDateTime(currentMatchToScore.slotTimestamp, 'date', currentMatchToScore.slotTime)}</p>
+                            <p>Team 1: {currentMatchToScore.team1.map(uid => getMemberName(uid, members)).join(' & ')}</p>
+                            <p>Team 2: {currentMatchToScore.team2.map(uid => getMemberName(uid, members)).join(' & ')}</p>
+                            <div className="mt-4 flex space-x-4">
+                                <input
+                                    type="number"
+                                    placeholder="Team 1 Score"
+                                    value={scoreTeam1}
+                                    onChange={(e) => setScoreTeam1(e.target.value)}
+                                    className="shadow appearance-none border rounded-lg w-1/2 py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                    min="0"
+                                    required
+                                />
+                                <input
+                                    type="number"
+                                    placeholder="Team 2 Score"
+                                    value={scoreTeam2}
+                                    onChange={(e) => setScoreTeam2(e.target.value)}
+                                    className="shadow appearance-none border rounded-lg w-1/2 py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                    min="0"
+                                    required
+                                />
+                            </div>
+                        </>
+                    }
+                    onConfirm={handleSubmitScore}
+                    onCancel={() => setShowSubmitScoreDialog(false)}
+                    confirmText="Submit Scores"
+                    cancelText="Cancel"
+                    showCancelButton={true}
                 />
             )}
 
@@ -553,13 +706,15 @@ const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole p
                     onClose={() => setShowMatchDetailsModal(false)}
                 />
             )}
+            {/* Generic Alert Dialog */}
             {showAlert && (
                 <CustomAlertDialog
                     message={alertMessage}
                     onConfirm={() => setShowAlert(false)}
-                    onCancel={() => setShowAlert(false)}
+                    onCancel={() => setShowAlert(false)} // Allow cancelling generic alerts
                     confirmText="Ok"
                     cancelText="Close"
+                    showCancelButton={true}
                 />
             )}
         </div>

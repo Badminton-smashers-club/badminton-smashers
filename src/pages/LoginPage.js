@@ -1,6 +1,6 @@
 // src/pages/LoginPage.js
 import React, { useState, useEffect } from 'react';
-import { collection, query, where, getDocs, addDoc, doc, setDoc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, setDoc } from 'firebase/firestore';
 import { LogIn, User, Eye, EyeOff, Send } from 'lucide-react';
 import CustomAlertDialog from '../components/CustomAlertDialog';
 // Import Firebase Auth methods
@@ -126,7 +126,7 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => {
           role: 'member',
           createdAt: new Date(),
           firebaseAuthUid: user.uid,
-          balance: 0,
+          registrationFeePending: 4, // Set pending fee
           eloRating: 1000,
           scores: []
         });
@@ -138,7 +138,7 @@ const LoginPage = ({ navigate, auth, db, appId, isDbReady }) => {
           firebaseAuthUid: user.uid,
           name: name.trim(),
           email: email,
-          balance: 0,
+          registrationFeePending: 4, // Set pending fee
           scores: [],
           eloRating: 1000,
           gamesPlayed: 0,
