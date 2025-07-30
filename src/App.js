@@ -1,4 +1,6 @@
-import React, { useState, useEffect, createContext, useContext } from 'react';
+// src/App.js
+
+import React, { useState, useEffect, createContext, useMemo, useContext } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, onAuthStateChanged, signOut, connectAuthEmulator } from 'firebase/auth'; 
 import { getFirestore, doc, getDoc, connectFirestoreEmulator } from 'firebase/firestore'; 
@@ -11,6 +13,9 @@ import MemberDashboard from './pages/MemberDashboard';
 import AdminDashboard from './pages/AdminDashboard';
 import MatchManagementPage from './pages/MatchManagementPage';
 import LeaderboardPage from './pages/LeaderboardPage';
+import { setupNotifications } from './utils/notifications'; // Add this import
+// const app = initializeApp(firebaseConfig)
+
 
 // --- Context for Firebase and User Data ---
 const AppContext = createContext(null);
@@ -18,214 +23,287 @@ const AppContext = createContext(null);
 // --- MAIN APP COMPONENT ---
 const App = () => {
   const [currentPage, setCurrentPage] = useState('home');
-  const [isAuthenticated, setIsAuthenticated] = useState(false); // Reflects if a *full profile* is loaded
+  const [isAuthenticated, setIsAuthenticated] = useState(false); // Reflects if user is logged in AND email is verified (or bypassed in dev)
   const [userRole, setUserRole] = useState(null); // 'member' or 'admin'
   const [userId, setUserId] = useState(null); // Firebase Auth UID
   const [db, setDb] = useState(null);
   const [auth, setAuth] = useState(null);
-  const [isAuthReady, setIsAuthReady] = useState(false);
-  const [isDbReady, setIsDbReady] = useState(false); // New state to track Firestore readiness
-  const [userData, setUserData] = useState(null); // Stores current user's private data from Firestore
-  const [publicUserId, setPublicUserId] = useState(null); // Stores the ID of the user's public profile
-  const [appId, setAppId] = useState(null); // State to hold the Firebase Project ID
+  const [isAuthReady, setIsAuthReady] = useState(false); // Indicates auth state has been checked
+  const [isDbReady, setIsDbReady] = useState(false); // Indicates db is connected
+  const [firebaseAppInstance, setFirebaseAppInstance] = useState(null); // <--- ADD THIS LINE
 
-  // Firebase Initialization and Authentication
+  // [NEW] Add userData state here
+  const [userData, setUserData] = useState(null); // To store the full user profile data
+
+  // Your Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+  const firebaseConfig = useMemo(() => ({ // WRAP with useMemo
+    apiKey: process.env.REACT_APP_FIREBASE_API_KEY,
+    authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN,
+    projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID,
+    storageBucket: process.env.REACT_APP_FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: process.env.REACT_APP_FIREBASE_MESSAGING_SENDER_ID,
+    appId: process.env.REACT_APP_FIREBASE_APP_ID,
+    measurementId: process.env.REACT_APP_FIREBASE_MEASUREMENT_ID
+  }), []);
+
+  const appId = firebaseConfig.projectId; // Use the appId from your config
+  const useEmulators = process.env.REACT_APP_FIREBASE_USE_FIREBASE_EMULATORS === 'true';
+
+
+  // Determine if running in a local development environment
+  const isLocalEnv = window.location.hostname === "localhost";
+
+  // Initialize Firebase app, auth, and firestore
   useEffect(() => {
     try {
-      const firebaseConfig = {
-        apiKey: "AIzaSyDKwvLR1ytSmKcl_Dw7CP09clBYw_xouEE",
-        authDomain: "smashers-badminton.firebaseapp.com",
-        projectId: "smashers-badminton",
-        storageBucket: "smashers-badminton.firebasestorage.app",
-        messagingSenderId: "743415345915",
-        appId: "1:743415345915:web:d8d04bcdce55b8848db65e",
-        measurementId: "G-MBDWPN0VNP" // Optional, if you use Analytics
-      };
-
+      console.log("firebaseConfig",firebaseConfig);
+      console.log("useEmulators",process.env.REACT_APP_FIREBASE_USE_FIREBASE_EMULATORS);
       const app = initializeApp(firebaseConfig);
-      const firestoreDb = getFirestore(app);
-      const firebaseAuth = getAuth(app);
+      const authInstance = getAuth(app);
+      const dbInstance = getFirestore(app);
 
-      // Connect to Firebase Emulators if running locally
-      if (window.location.hostname === "localhost") {
-        connectFirestoreEmulator(firestoreDb, 'localhost', 8080);
-        connectAuthEmulator(firebaseAuth, 'http://localhost:9099');
-        console.log("App.js: Connected to Firebase Emulators.");
+      
+      // Connect to Firebase emulators if running locally
+      if (useEmulators) {
+        connectAuthEmulator(authInstance, "http://127.0.0.1:9099");
+        connectFirestoreEmulator(dbInstance, "127.0.0.1", 8080);
+        console.log("Connected to Firebase Emulators!");
+      } else {
+        console.log("Connecting to live Firebase project:", firebaseConfig.projectId);
       }
 
-      setDb(firestoreDb);
-      setAuth(firebaseAuth);
-      setAppId(firebaseConfig.projectId);
+      setAuth(authInstance);
+      setDb(dbInstance);
+      setFirebaseAppInstance(app); // <--- ADD THIS LINE
       setIsDbReady(true);
+    } catch (e) {
+      console.error("Error initializing Firebase:", e);
+    }
+  }, [useEmulators,firebaseConfig]); // Added isLocalEnv to dependencies to re-run if it changes (though unlikely)
 
-      const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
+  // Auth state listener
+  useEffect(() => {
+    if (auth && db) { // Ensure auth and db are initialized before setting up listener
+      const unsubscribe = onAuthStateChanged(auth, async (user) => {
         if (user) {
-          console.log("App.js: onAuthStateChanged - Firebase Auth User IS authenticated. UID:", user.uid);
-          setUserId(user.uid); 
+          setUserId(user.uid);
 
-          const userProfileRef = doc(firestoreDb, `artifacts/${firebaseConfig.projectId}/users/${user.uid}/profile/data`);
-          let userDocSnap;
-          try {
-              userDocSnap = await getDoc(userProfileRef);
-          } catch (readError) {
-              console.error("App.js: Error reading user profile document:", readError);
-              userDocSnap = { exists: () => false };
-          }
+          // Determine if email verification is required for authentication
+          const emailVerificationRequired = !isLocalEnv; // Required in prod, bypassed in local
 
-          if (userDocSnap.exists()) {
-            const data = userDocSnap.data();
-            console.log("App.js: User profile EXISTS. Navigating to:", data.role === 'admin' ? 'adminDashboard' : 'memberDashboard');
-            setUserData(data);
-            setUserRole(data.role);
-            setPublicUserId(data.publicId);
-            setIsAuthenticated(true); // Set true only if a full profile exists
-            setCurrentPage(data.role === 'admin' ? 'adminDashboard' : 'memberDashboard');
+          // Check if user is authenticated based on email verification status (or bypass if local)
+          if (!emailVerificationRequired || user.emailVerified) {
+            const publicUserRef = doc(db, `artifacts/${appId}/public/data/users`, user.uid);
+            const userDoc = await getDoc(publicUserRef);
+            if (userDoc.exists()) {
+              setIsAuthenticated(true);
+              const data = userDoc.data(); // Get the public user data
+              setUserRole(data.role); // Set user role from public data
+              setUserData(data); // [NEW] Set the full public user data to state
+              console.log("App: User authenticated and profile loaded:", user.uid);
+            } else {
+              // User is logged in (and email verified if required), but public profile doesn't exist yet.
+              // This might happen on first login after verification/registration.
+              // Keep isAuthenticated false until profile is confirmed loaded/created in LoginPage.
+              setIsAuthenticated(false);
+              setUserRole(null);
+              setUserData(null); // [NEW] Clear user data if profile is missing
+              console.log("App: User logged in, email verified (if required), but public profile not found. Awaiting profile creation on login.");
+            }
           } else {
-            console.log("App.js: User profile DOES NOT EXIST. Navigating to login page to create profile.");
-            setUserData(null);
-            setUserRole(null); // Explicitly set to null if no profile
-            setPublicUserId(null);
-            setIsAuthenticated(false); // Explicitly set false if no profile
-            setCurrentPage('login');
+            // User is logged in but email is NOT verified AND verification IS required (i.e., production)
+            setIsAuthenticated(false);
+            setUserRole(null);
+            setUserData(null); // [NEW] Clear user data
+            console.log("App: User logged in but email not verified. Setting isAuthenticated to false. (This check is bypassed in local env)");
+            // In a production environment, you might want to force a sign out here
+            // or redirect to an email verification page.
+            // await signOut(auth); // Uncomment if you want unverified users to be immediately logged out in prod
           }
         } else {
-          console.log("App.js: onAuthStateChanged - No Firebase Auth user authenticated. Navigating to login page.");
-          setUserId(null);
+          // No user is logged in
           setIsAuthenticated(false);
           setUserRole(null);
-          setUserData(null);
-          setPublicUserId(null);
-          setCurrentPage('login');
+          setUserId(null);
+          setUserData(null); // [NEW] Clear user data on logout
+          console.log("App: No user logged in.");
         }
-        setIsAuthReady(true);
+        setIsAuthReady(true); // Authentication state has been determined (ready)
       });
-
       return () => unsubscribe();
     }
-    catch (error) {
-      console.error("App.js: Error initializing Firebase:", error);
-      setIsAuthReady(true);
-    }
-  }, []);
+  }, [auth, db, appId, isLocalEnv]); // Added isLocalEnv as a dependency
 
+  // NEW useEffect for Navigation after Auth State is Ready
+  useEffect(() => {
+    console.log('App.js (Navigation useEffect): isAuthenticated:', isAuthenticated, 'userRole:', userRole, 'isAuthReady:', isAuthReady, 'currentPage:', currentPage);
+
+    // Only navigate if authentication is ready, user is authenticated,
+    // and we have a user role (meaning user data has been fetched)
+    // and if the current page is 'login' or 'home' (pages from which you'd navigate after auth)
+    if (isAuthReady && isAuthenticated && userRole && (currentPage === 'login' || currentPage === 'home')) {
+      console.log('App.js (Navigation useEffect): Navigation trigger condition met. Navigating...');
+      if (userRole === 'admin') {
+        setCurrentPage('adminDashboard');
+      } else { // 'member' or any other role
+        setCurrentPage('memberDashboard');
+      }
+    }
+  }, [isAuthenticated, userRole, isAuthReady, currentPage]); // Depend on these states
+
+      // [NEW] Setup notifications when user is authenticated
+  useEffect(() => {
+      if (isAuthenticated && auth && db && userId && appId && firebaseAppInstance) {
+          setupNotifications(firebaseAppInstance, auth, db, userId, appId);
+      }
+  }, [isAuthenticated, auth, db, userId, appId, firebaseAppInstance]);
+  
   const navigate = (page) => {
     setCurrentPage(page);
   };
 
   const handleLogout = async () => {
-    if (auth) {
-      try {
-        await signOut(auth);
-        console.log("App.js: User signed out.");
-        setUserId(null);
-        setIsAuthenticated(false);
-        setUserRole(null);
-        setUserData(null);
-        setPublicUserId(null);
-        setCurrentPage('home');
-      } catch (error) {
-        console.error("App.js: Error signing out:", error);
-      }
+    try {
+      await signOut(auth);
+      navigate('login'); // Redirect to login page after logout
+      console.log("User logged out successfully.");
+    } catch (error) {
+      console.error("Error logging out:", error.message);
     }
   };
 
-  // Wait for both auth and DB to be ready before rendering the main app
-  if (!isAuthReady || !isDbReady || appId === null) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100">
-        <div className="text-xl font-semibold text-gray-700">Loading application...</div>
-      </div>
-    );
-  }
-
-  // Render the selected PageComponent based on currentPage state
+  // Determine which page component to render based on currentPage and authentication state
   let PageComponent;
-  switch (currentPage) {
-    case 'home':
-      PageComponent = <HomePage navigate={navigate} isAuthenticated={isAuthenticated} />;
-      break;
-    case 'login':
-      PageComponent = <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
-      break;
-    case 'memberDashboard':
-      // Only show dashboard if isAuthenticated is true (meaning full profile exists) and role matches
-      PageComponent = isAuthenticated && userRole === 'member' ? <MemberDashboard userId={userId} publicUserId={publicUserId} db={db} appId={appId} userData={userData} setUserData={setUserData} /> : <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
-      break;
-    case 'adminDashboard':
-      // Only show dashboard if isAuthenticated is true (meaning full profile exists) and role matches
-      PageComponent = isAuthenticated && userRole === 'admin' ? <AdminDashboard userId={userId} db={db} appId={appId} /> : <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
-      break;
-    case 'matchManagement':
-      // Only allow access if isAuthenticated is true (meaning full profile exists)
-      PageComponent = isAuthenticated ? <MatchManagementPage userId={userId} db={db} appId={appId} /> : <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
-      break;
-    case 'leaderboard':
-      PageComponent = <LeaderboardPage db={db} appId={appId} />;
-      break;
-    default:
-      PageComponent = <HomePage navigate={navigate} isAuthenticated={isAuthenticated} />;
+  if (currentPage === 'home') {
+    PageComponent = <HomePage navigate={navigate} />;
+  } else if (currentPage === 'login') {
+    PageComponent = <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
+  } else if (currentPage === 'memberDashboard' && isAuthenticated && userRole === 'member') {
+    PageComponent = <MemberDashboard />;
+  } else if (currentPage === 'adminDashboard' && isAuthenticated && userRole === 'admin') {
+    PageComponent = <AdminDashboard navigate={navigate} />;
   }
-
+  // [MODIFIED] Allow all authenticated users (members and admins) to access MatchManagementPage
+  else if (currentPage === 'matchManagement' && isAuthenticated) { // Removed userRole === 'admin'
+    PageComponent = <MatchManagementPage userId={userId} db={db} appId={appId} />;
+  } else if (currentPage === 'leaderboard') {
+    PageComponent = <LeaderboardPage navigate={navigate} appId={appId} db={db} />;
+  } else {
+    if (isAuthReady && !isAuthenticated && currentPage !== 'login' && currentPage !== 'home') {
+      PageComponent = <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
+      if (currentPage !== 'login') {
+        navigate('login');
+      }
+    } else {
+      PageComponent = <HomePage navigate={navigate} />;
+    }
+  }
 
   return (
-    <AppContext.Provider value={{ db, auth, userId, isAuthenticated, userRole, userData, setUserData, appId: appId }}>
-      <div className="min-h-screen bg-gradient-to-br from-blue-100 to-purple-100 font-inter flex flex-col">
-        {/* Header */}
-        <header className="bg-white shadow-md p-4 flex items-center justify-between rounded-b-xl">
-          <h1 className="text-3xl font-bold text-blue-800 flex items-center">
-            <Trophy className="mr-2 text-yellow-500" size={32} />
-            Smashers Badminton
-          </h1>
-          <nav className="flex space-x-4">
-            <button onClick={() => navigate('home')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
-              <Home className="mr-1" size={20} /> Home
-            </button>
-            {/* Conditionally render dashboard links based on isAuthenticated and userRole */}
-            {isAuthenticated && userRole === 'member' && (
-              <button onClick={() => navigate('memberDashboard')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
-                <User className="mr-1" size={20} /> Dashboard
-              </button>
-            )}
-            {isAuthenticated && userRole === 'admin' && (
-              <button onClick={() => navigate('adminDashboard')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
-                <Settings className="mr-1" size={20} /> Admin
-              </button>
-            )}
-            {/* Matches and Leaderboard might be accessible to unauthenticated users depending on rules, but currently they also require isAuthenticated *before* a full profile is loaded, which is incorrect.  They should also be guarded by isAuthenticated for consistency */}
-            {isAuthenticated && (
-              <button onClick={() => navigate('matchManagement')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
-                <Trophy className="mr-1" size={20} /> Matches
-              </button>
-            )}
-            {isAuthenticated && (
-              <button onClick={() => navigate('leaderboard')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
-                <TrendingUp className="mr-1" size={20} /> Leaderboard
-              </button>
-            )}
-            {!isAuthenticated ? (
-              <button onClick={() => navigate('login')} className="flex items-center bg-blue-600 text-white px-4 py-2 rounded-lg shadow-md hover:bg-blue-700 transition duration-200 ease-in-out">
-                <LogIn className="mr-1" size={20} /> Login
-              </button>
-            ) : (
-              <button onClick={handleLogout} className="flex items-center bg-red-500 text-white px-4 py-2 rounded-lg shadow-md hover:bg-red-600 transition duration-200 ease-in-out">
-                <LogOut className="mr-1" size={20} /> Logout
-              </button>
-            )}
-          </nav>
-        </header>
+    <AppContext.Provider value={{
+      db, auth, userId, userRole,
+      isAuthenticated, setIsAuthenticated,
+      isAuthReady,
+      isDbReady,
+      appId,
+      userData,
+      setUserData
+    }}>
+      {!isAuthReady ? (
+        <div className="flex flex-col min-h-screen bg-gray-50 font-sans items-center justify-center text-xl text-gray-700">
+          <img src="/loading-spinner.gif" alt="Loading..." className="w-16 h-16 mb-4" /> {/* Optional: add a loading spinner */}
+          Loading application state...
+        </div>
+      ) : (
+        // Only render the main application structure if authentication state is ready
+        <div className="flex flex-col min-h-screen bg-gray-50 font-sans">
+          {/* Header/Navigation */}
+          <header className="flex items-center justify-between p-4 bg-white shadow-md rounded-b-xl">
+            <div className="flex items-center space-x-6">
+              <h1 className="text-3xl font-extrabold text-blue-700">Smashers Badminton</h1>
+              <nav className="flex items-center space-x-2">
+                <button onClick={() => navigate('home')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
+                  <Home className="mr-1" size={20} /> Home
+                </button>
 
-        {/* Main Content Area */}
-        <main className="flex-grow p-6 flex items-center justify-center">
-          {PageComponent} {/* Render the selected PageComponent */}
-        </main>
+                {/* Conditional Navigation for Authenticated Users */}
+                {isAuthenticated && userRole === 'member' && (
+                  <button onClick={() => navigate('memberDashboard')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
+                    <User className="mr-1" size={20} /> Dashboard
+                  </button>
+                )}
+                {isAuthenticated && userRole === 'admin' && (
+                  <button onClick={() => navigate('adminDashboard')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
+                    <Settings className="mr-1" size={20} /> Admin
+                  </button>
+                )}
+                {isAuthenticated && (
+                  <button onClick={() => navigate('matchManagement')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
+                    <Calendar className="mr-1" size={20} /> Matches
+                  </button>
+                )}
+                {(isAuthenticated || currentPage === 'leaderboard') && (
+                  <button onClick={() => navigate('leaderboard')} className="flex items-center text-gray-700 hover:text-blue-600 font-medium px-3 py-2 rounded-lg transition duration-200 ease-in-out hover:bg-blue-50">
+                    <TrendingUp className="mr-1" size={20} /> Leaderboard
+                  </button>
+                )}
+              </nav>
+            </div>
 
-        {/* Footer */}
-        <footer className="bg-white shadow-inner p-4 text-center text-gray-600 text-sm rounded-t-xl mt-auto">
-          &copy; {new Date().getFullYear()} Smashers Badminton Group. All rights reserved.
-        </footer>
-      </div>
+            <nav className="flex items-center space-x-3">
+              {!isAuthenticated ? (
+                <button onClick={() => navigate('login')} className="flex items-center bg-blue-600 text-white px-4 py-2 rounded-lg shadow-md hover:bg-blue-700 transition duration-200 ease-in-out">
+                  <LogIn className="mr-1" size={20} /> Login
+                </button>
+              ) : (
+                <button onClick={handleLogout} className="flex items-center bg-red-500 text-white px-4 py-2 rounded-lg shadow-md hover:bg-red-600 transition duration-200 ease-in-out">
+                  <LogOut className="mr-1" size={20} /> Logout
+                </button>
+              )}
+            </nav>
+          </header>
+
+          {/* Main Content Area - This is where your pages will be rendered */}
+          <main className="flex-grow p-6 flex items-center justify-center">
+            {/* NEW AND SIMPLIFIED PAGE COMPONENT RENDERING LOGIC */}
+            {(() => {
+              if (!isAuthenticated) {
+                // If not authenticated, always show LoginPage (or HomePage if it's public entry)
+                return <LoginPage navigate={navigate} auth={auth} db={db} appId={appId} isDbReady={isDbReady} />;
+              }
+
+              // If authenticated, render based on currentPage and userRole
+              switch (currentPage) {
+                case 'home':
+                  // After login, 'home' might default to the user's dashboard
+                  return userRole === 'admin' ? <AdminDashboard navigate={navigate} /> : <MemberDashboard />;
+                case 'memberDashboard':
+                  return <MemberDashboard />;
+                case 'adminDashboard':
+                  return <AdminDashboard navigate={navigate} />;
+                case 'matchManagement':
+                  return <MatchManagementPage userId={userId} db={db} appId={appId} />;
+                case 'leaderboard':
+                  return <LeaderboardPage navigate={navigate} appId={appId} db={db} />;
+                case 'login': // If authenticated user somehow lands on login page, redirect to home/dashboard
+                  return userRole === 'admin' ? <AdminDashboard navigate={navigate} /> : <MemberDashboard />;
+                default:
+                  // Fallback for any unknown or unhandled page state
+                  return userRole === 'admin' ? <AdminDashboard navigate={navigate} /> : <MemberDashboard />;
+              }
+            })()}
+          </main>
+
+          {/* Footer */}
+          <footer className="bg-white shadow-inner p-4 text-center text-gray-600 text-sm rounded-t-xl mt-auto">
+            &copy; 2025 Smashers Badminton. All rights reserved.
+          </footer>
+        </div>
+      )}
     </AppContext.Provider>
   );
 };
 
+export { AppContext };
 export default App;

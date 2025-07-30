@@ -19,6 +19,8 @@ const AdminDashboard = ({ userId, db, appId }) => {
     const [showRecurringSlotModal, setShowRecurringSlotModal] = useState(false);
     const [showAlert, setShowAlert] = useState(false);
     const [alertMessage, setAlertMessage] = useState('');
+    const [topUpLink, setTopUpLink] = useState('');
+    const appSettingsDocId = 'appConfig';
   
   
     // Fetch members and slots
@@ -39,12 +41,39 @@ const AdminDashboard = ({ userId, db, appId }) => {
         setSlots(fetchedSlots);
       }, (error) => console.error("Error fetching slots:", error));
   
-      return () => {
-        unsubscribeUsers();
-        unsubscribeSlots();
-      };
-    }, [db, appId]);
-  
+      const appSettingsRef = doc(db, `artifacts/${appId}/public/data/appSettings`, appSettingsDocId);
+      const unsubscribeAppSettings = onSnapshot(appSettingsRef, (docSnap) => {
+          if (docSnap.exists()) {
+              setTopUpLink(docSnap.data().topUpLink || '');
+          } else {
+              setTopUpLink(''); // Clear if not found
+          }
+      }, (error) => console.error("Error fetching admin app settings:", error));
+
+      // Ensure you return all unsubscribe functions if you combine them
+      // Example: return () => { unsubscribeMembers(); unsubscribeSlots(); unsubscribeAppSettings(); };
+      return () => unsubscribeAppSettings(); // If this is a standalone useEffect
+    }, [db, appId]); // Dependencies
+
+    // AdminDashboard.js
+    const handleUpdateTopUpLink = async () => {
+      setMessage('');
+      setAlertMessage('');
+      if (!topUpLink) {
+          setAlertMessage('Please enter a valid top-up link.');
+          setShowAlert(true);
+          return;
+      }
+      try {
+          const appSettingsRef = doc(db, `artifacts/${appId}/public/data/appSettings`, appSettingsDocId);
+          await setDoc(appSettingsRef, { topUpLink: topUpLink }, { merge: true }); // Use setDoc with merge to create if not exists, update if it does
+          setMessage('Top-up link updated successfully!');
+      } catch (error) {
+          console.error("Error updating top-up link:", error);
+          setAlertMessage('Failed to update top-up link.');
+          setShowAlert(true);
+      }
+    };
     const handleAddSlot = async (e) => {
       e.preventDefault();
       setMessage('');
@@ -238,6 +267,7 @@ const AdminDashboard = ({ userId, db, appId }) => {
             )}
           </div>
         </div>
+        
   
         {/* Right Section: Slot Management */}
         <div className="flex-1 space-y-6">
@@ -364,6 +394,29 @@ const AdminDashboard = ({ userId, db, appId }) => {
                   {message}
                 </p>
               )}
+            </div>
+            {/* AdminDashboard.js - inside the main return() ... <div> */}
+
+            {/* Top-up Link Management */}
+            <div className="bg-white p-6 rounded-2xl shadow-xl space-y-4 rounded-xl">
+                <h3 className="text-2xl font-bold text-gray-800 text-center">Manage Member Top-up Link</h3>
+                <div>
+                    <label htmlFor="topUpLinkInput" className="block text-gray-700 text-sm font-bold mb-2">Top-up Payment Link:</label>
+                    <input
+                        type="url" // Use type="url" for better validation
+                        id="topUpLinkInput"
+                        value={topUpLink}
+                        onChange={(e) => setTopUpLink(e.target.value)}
+                        placeholder="e.g., https://yourpaymentsite.com/pay..."
+                        className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                    />
+                </div>
+                <button
+                    onClick={handleUpdateTopUpLink}
+                    className="w-full bg-indigo-600 text-white py-2 px-4 rounded-lg shadow-md hover:bg-indigo-700 transition duration-200 ease-in-out"
+                >
+                    Update Top-up Link
+                </button>
             </div>
           </div>
         )}

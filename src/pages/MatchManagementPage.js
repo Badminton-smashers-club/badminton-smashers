@@ -1,475 +1,568 @@
-import React, { useState, useEffect, createContext, useContext } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged, signOut } from 'firebase/auth';
-import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, addDoc, getDocs, deleteDoc } from 'firebase/firestore';
-import { Home, User, LogIn, Calendar, Trophy, DollarSign, Users, PlusCircle, CheckCircle, XCircle, Bell, Settings, LogOut, Edit, Clock, List, TrendingUp, Info } from 'lucide-react';
-import CustomAlertDialog from '../components/CustomAlertDialog'; // Adjust the path if necessary
-import MatchDetailsModal from '../components/MatchDetailsModal'; // Adjust the path if necessary
-import calculateEloChange from '../utils/elo'; // Adjust the path if necessary
+import React, { useState, useEffect, useCallback } from 'react';
+import { collection, addDoc, doc, updateDoc, onSnapshot, getDoc } from 'firebase/firestore'; // getDoc added
+import { PlusCircle, Users, Trophy, Bell, CheckCircle, Info, XCircle } from 'lucide-react'; // XCircle added
+import CustomAlertDialog from '../components/CustomAlertDialog';
+import MatchDetailsModal from '../components/MatchDetailsModal';
 
-
-const MatchManagementPage = ({ userId, db, appId }) => {
+const MatchManagementPage = ({ userId, db, appId, userRole }) => { // userRole prop added
     const [members, setMembers] = useState([]);
     const [matches, setMatches] = useState([]);
-    const [team1Player1, setTeam1Player1] = useState('');
-    const [team1Player2, setTeam1Player2] = useState('');
-    const [team2Player1, setTeam2Player1] = useState('');
-    const [team2Player2, setTeam2Player2] = useState('');
+    // State for new match form inputs
+    const [team1Player1Name, setTeam1Player1Name] = useState('');
+    const [team1Player2Name, setTeam1Player2Name] = useState('');
+    const [team2Player1Name, setTeam2Player1Name] = useState('');
+    const [team2Player2Name, setTeam2Player2Name] = useState('');
     const [scoreTeam1, setScoreTeam1] = useState('');
     const [scoreTeam2, setScoreTeam2] = useState('');
     const [message, setMessage] = useState('');
-    const [showConfirmModal, setShowConfirmModal] = useState(false);
-    const [matchToConfirm, setMatchToConfirm] = useState(null);
-    const [showMatchDetailsModal, setShowMatchDetailsModal] = useState(false);
-    const [selectedMatchForDetails, setSelectedMatchForDetails] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
     const [showAlert, setShowAlert] = useState(false);
     const [alertMessage, setAlertMessage] = useState('');
-  
-    useEffect(() => {
-      if (!db) return;
-  
-      // Fetch all members for team selection from public data
-      const usersRef = collection(db, `artifacts/${appId}/public/data/users`);
-      const unsubscribeUsers = onSnapshot(usersRef, (snapshot) => {
-        const fetchedMembers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setMembers(fetchedMembers.filter(m => m.role === 'member' && m.firebaseAuthUid)); // Only show members with a linked Auth UID
-      }, (error) => console.error("Error fetching members:", error));
-  
-      // Fetch all matches
-      const matchesRef = collection(db, `artifacts/${appId}/public/data/matches`);
-      const unsubscribeMatches = onSnapshot(matchesRef, (snapshot) => {
-        const fetchedMatches = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setMatches(fetchedMatches);
-      }, (error) => console.error("Error fetching matches:", error));
-  
-      return () => {
-        unsubscribeUsers();
-        unsubscribeMatches();
-      };
-    }, [db, appId]);
-  
-    const handleAddMatch = async (e) => {
-      e.preventDefault();
-      setMessage('');
-      setAlertMessage('');
-  
-      const team1 = [team1Player1, team1Player2].filter(Boolean);
-      const team2 = [team2Player1, team2Player2].filter(Boolean);
-  
-      if (team1.length === 0 || team2.length === 0 || !scoreTeam1 || !scoreTeam2) {
-        setAlertMessage('Please select at least one player for each team and enter scores.');
-        setShowAlert(true);
-        return;
-      }
-  
-      // Check for duplicate players across teams
-      const allPlayers = [...team1, ...team2];
-      const uniquePlayers = new Set(allPlayers);
-      if (allPlayers.length !== uniquePlayers.size) {
-          setAlertMessage('A player cannot be on both teams.');
-          setShowAlert(true);
-          return;
-      }
-  
-      // Check if current user is part of either team (using Firebase Auth UID)
-      const currentUserIsPlayer = team1.includes(userId) || team2.includes(userId);
-      if (!currentUserIsPlayer) {
-          setAlertMessage('You must be one of the players to add a match.');
-          setShowAlert(true);
-          return;
-      }
-  
-      try {
-        const newMatch = {
-          date: new Date().toISOString().split('T')[0], // Current date
-          team1: team1, // Store Firebase Auth UIDs
-          team2: team2, // Store Firebase Auth UIDs
-          score1: parseInt(scoreTeam1), // Ensure scores are numbers
-          score2: parseInt(scoreTeam2), // Ensure scores are numbers
-          addedBy: userId, // Store Firebase Auth UID of the adder
-          confirmedBy: [], // Array of Firebase Auth UIDs who confirmed
-          status: 'pending_confirmation'
-        };
-  
-        await addDoc(collection(db, `artifacts/${appId}/public/data/matches`), newMatch);
-        setMessage('Match added successfully! Awaiting opponent confirmation.');
-        setTeam1Player1('');
-        setTeam1Player2('');
-        setTeam2Player1('');
-        setTeam2Player2('');
-        setScoreTeam1('');
-        setScoreTeam2('');
-      } catch (error) {
-        console.error("Error adding match:", error);
-        setAlertMessage('Failed to add match. Please try again.');
-        setShowAlert(true);
-      }
-    };
-  
-    const handleConfirmMatch = async (match) => {
-      setMessage('');
-      setAlertMessage('');
-      // Check if the current user is an opponent and hasn't confirmed yet (using Firebase Auth UID)
-      const isOpponent = match.team1.includes(userId) || match.team2.includes(userId);
-      const alreadyConfirmed = match.confirmedBy.includes(userId);
-  
-      if (!isOpponent || alreadyConfirmed) {
-        setAlertMessage('You cannot confirm this match or have already confirmed it.');
-        setShowAlert(true);
-        setShowConfirmModal(false);
-        return;
-      }
-  
-      try {
-        const matchDocRef = doc(db, `artifacts/${appId}/public/data/matches`, match.id);
-        const updatedConfirmedBy = [...match.confirmedBy, userId]; // Add Firebase Auth UID to confirmedBy
-        const newStatus = updatedConfirmedBy.length >= 1 ? 'confirmed' : 'pending_confirmation'; // At least one opponent confirms
-  
-        await updateDoc(matchDocRef, {
-          confirmedBy: updatedConfirmedBy,
-          status: newStatus
-        });
-  
-        // Update scores and Elo ratings for participating members if confirmed
-        if (newStatus === 'confirmed') {
-          const team1Players = match.team1;
-          const team2Players = match.team2;
-  
-          const team1Won = match.score1 > match.score2;
-          const isDraw = match.score1 === match.score2;
-  
-          // Fetch current Elo ratings and gamesPlayed for all players involved
-          const playerStatsMap = new Map(); // Map: UID -> { eloRating, gamesPlayed, publicId }
-          const allPlayerUids = [...new Set([...team1Players, ...team2Players])];
-          for (const uid of allPlayerUids) {
-              const playerProfileRef = doc(db, `artifacts/${appId}/users/${uid}/profile/data`);
-              const playerDocSnap = await getDoc(playerProfileRef);
-              if (playerDocSnap.exists()) {
-                // Store the entire data object from the private profile
-                playerStatsMap.set(uid, playerDocSnap.data());
-            } else {
-                // This scenario should ideally not happen if users are properly registered
-                console.warn(`Player profile not found for UID: ${uid}. Defaulting Elo to 1000.`);
-                // Ensure default object also includes an empty scores array
-                playerStatsMap.set(uid, { eloRating: 1000, gamesPlayed: 0, scores: [], publicId: null });
-            }
-          }
-  
-          // Calculate average Elo for each team
-          const getAverageElo = (teamUids) => {
-              if (teamUids.length === 0) return 0;
-              const totalElo = teamUids.reduce((sum, uid) => sum + playerStatsMap.get(uid).eloRating, 0);
-              return totalElo / teamUids.length;
-          };
-  
-          const team1AvgElo = getAverageElo(team1Players);
-          const team2AvgElo = getAverageElo(team2Players);
-  
-          // Update Elo for each player and update their score history
-          for (const playerId of allPlayerUids) {
-            const playerProfileRef = doc(db, `artifacts/${appId}/users/${playerId}/profile/data`);
-            const currentStats = playerStatsMap.get(playerId);
-            const currentElo = currentStats.eloRating;
-            const currentGamesPlayed = currentStats.gamesPlayed;
-            const publicId = currentStats.publicId;
-  
-            const newScores = [...(currentStats.scores || [])];
-                                                              // For simplicity, we'll append to the fetched scores.
-  
-            let outcome; // 1 for win, 0.5 for draw, 0 for loss
-            let opponentEloForCalc;
-            let opponentName = '';
-            let winStatus = false;
-  
-            if (team1Players.includes(playerId)) { // Player is in Team 1
-              opponentEloForCalc = team2AvgElo;
-              if (team1Won) {
-                outcome = 1;
-                winStatus = true;
-              } else if (isDraw) {
-                outcome = 0.5;
-                winStatus = false; // Or true if you consider draw as not a loss
-              } else {
-                outcome = 0;
-                winStatus = false;
-              }
-              opponentName = team2Players.map(id => members.find(m => m.firebaseAuthUid === id)?.name || 'Unknown').join(' & ');
-            } else { // Player is in Team 2
-              opponentEloForCalc = team1AvgElo;
-              if (!team1Won && !isDraw) { // Team 2 wins
-                outcome = 1;
-                winStatus = true;
-              } else if (isDraw) {
-                outcome = 0.5;
-                winStatus = false; // Or true if you consider draw as not a loss
-              } else {
-                outcome = 0;
-                winStatus = false;
-              }
-              opponentName = team1Players.map(id => members.find(m => m.firebaseAuthUid === id)?.name || 'Unknown').join(' & ');
-            }
-  
-            const eloChange = calculateEloChange(currentElo, opponentEloForCalc, outcome, currentGamesPlayed);
-            const newElo = currentElo + eloChange;
-            const newGamesPlayed = currentGamesPlayed + 1;
-  
-            newScores.push({
-              date: match.date,
-              opponent: opponentName,
-              score: `${match.score1}-${match.score2}`,
-              win: winStatus
-            });
-  
-            // Update private profile
-            await updateDoc(playerProfileRef, {
-              scores: newScores,
-              eloRating: newElo,
-              gamesPlayed: newGamesPlayed
-            });
-  
-            // Update public profile as well
-            if (publicId) {
-                const publicUserDocRef = doc(db, `artifacts/${appId}/public/data/users`, publicId);
-                await updateDoc(publicUserDocRef, {
-                  scores: newScores, // Keep public scores in sync
-                  eloRating: newElo,
-                  gamesPlayed: newGamesPlayed
-                });
-            }
-          }
+
+    // New states for match setup by members
+    const [slots, setSlots] = useState([]); // To fetch all slots
+    const [selectedMatchDate, setSelectedMatchDate] = useState(''); // New state for match date
+    const [availablePlayersOnDate, setAvailablePlayersOnDate] = useState([]); // Players available on selected date
+
+    // States for confirmation modal
+    const [showConfirmModal, setShowConfirmModal] = useState(false);
+    const [matchToConfirm, setMatchToConfirm] = useState(null);
+
+    // States for match details modal
+    const [showMatchDetailsModal, setShowMatchDetailsModal] = useState(false);
+    const [selectedMatchForDetails, setSelectedMatchForDetails] = useState(null);
+
+    // Helper function to format date/time consistently
+    const formatSlotDateTime = (dateTimeString, type = 'date') => {
+        if (!dateTimeString) {
+            return 'N/A';
         }
-  
-        setMessage('Match confirmed successfully! Elo ratings updated.');
-        setShowConfirmModal(false);
-        setMatchToConfirm(null);
-      } catch (error) {
-        console.error("Error confirming match:", error);
-        setAlertMessage('Failed to confirm match. Please try again.');
-        setShowAlert(true);
-      }
+        const dateObj = new Date(dateTimeString);
+        if (isNaN(dateObj.getTime())) {
+            console.error("Invalid dateTime string encountered:", dateTimeString);
+            return 'Invalid Date';
+        }
+
+        if (type === 'date') {
+            return dateObj.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+        } else if (type === 'time') {
+            return dateObj.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+        } else if (type === 'full') {
+            return dateObj.toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' });
+        }
+        return 'N/A';
     };
-  
-    const openConfirmModal = (match) => {
-      setMatchToConfirm(match);
-      setShowConfirmModal(true);
+
+    // Memoized getters for member name and UID
+    const getMemberName = useCallback((uid) => {
+        const member = members.find(m => m.firebaseAuthUid === uid);
+        return member ? member.name : 'Unknown Player';
+    }, [members]);
+
+    const getMemberUid = useCallback((name) => {
+        const member = members.find(m => m.name === name);
+        return member ? member.firebaseAuthUid : null;
+    }, [members]);
+
+    // Fetch members, matches, and slots
+    useEffect(() => {
+        if (!db) return;
+
+        const usersRef = collection(db, `artifacts/${appId}/public/data/users`);
+        const unsubscribeUsers = onSnapshot(usersRef, (snapshot) => {
+            const fetchedMembers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setMembers(fetchedMembers);
+        }, (err) => {
+            console.error("Error fetching members for match management:", err);
+            setError("Failed to load members.");
+        });
+
+        const matchesRef = collection(db, `artifacts/${appId}/public/data/matches`);
+        const unsubscribeMatches = onSnapshot(matchesRef, (snapshot) => {
+            const fetchedMatches = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            // Sort matches by date (newest first) and then by status (pending for current user first)
+            fetchedMatches.sort((a, b) => {
+                const dateA = new Date(a.date);
+                const dateB = new Date(b.date);
+                if (dateA.getTime() !== dateB.getTime()) {
+                    return dateB.getTime() - dateA.getTime(); // Newest first
+                }
+                // Prioritize pending for current user
+                const isAPendingForUser = a.status === 'pending_confirmation' && (a.team1.includes(userId) || a.team2.includes(userId)) && !a.confirmedBy.includes(userId);
+                const isBPendingForUser = b.status === 'pending_confirmation' && (b.team1.includes(userId) || b.team2.includes(userId)) && !b.confirmedBy.includes(userId);
+                if (isAPendingForUser && !isBPendingForUser) return -1;
+                if (!isAPendingForUser && isBPendingForUser) return 1;
+                return 0;
+            });
+            setMatches(fetchedMatches);
+            setLoading(false);
+        }, (err) => {
+            console.error("Error fetching matches:", err);
+            setError("Failed to load matches.");
+            setLoading(false);
+        });
+
+        // NEW: Fetch all slots to filter available players by date
+        const slotsRef = collection(db, `artifacts/${appId}/public/data/slots`);
+        const unsubscribeSlots = onSnapshot(slotsRef, (snapshot) => {
+            const fetchedSlots = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setSlots(fetchedSlots);
+        }, (err) => {
+            console.error("Error fetching slots for match management:", err);
+        });
+
+        return () => {
+            unsubscribeUsers();
+            unsubscribeMatches();
+            unsubscribeSlots(); // Unsubscribe from slots
+        };
+    }, [db, appId, userId]); // Add userId to dependencies
+
+    // Effect to determine available players based on selected date and booked slots
+    useEffect(() => {
+        if (!selectedMatchDate || !members.length || !slots.length) {
+            setAvailablePlayersOnDate([]);
+            return;
+        }
+
+        const bookedUserIdsOnDate = new Set();
+        // Filter slots for the selected date and get unique bookedBy UIDs
+        slots.forEach(slot => {
+            // Compare the date part of the slot's dateTime with the selectedMatchDate
+            const slotDate = new Date(slot.dateTime).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+            const inputDate = new Date(selectedMatchDate).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+            if (slotDate === inputDate && slot.bookedBy) {
+                bookedUserIdsOnDate.add(slot.bookedBy);
+            }
+        });
+
+        // Filter members based on who has booked a slot on the selected date
+        const players = members.filter(member => bookedUserIdsOnDate.has(member.firebaseAuthUid));
+        setAvailablePlayersOnDate(players);
+
+    }, [selectedMatchDate, members, slots]); // Dependencies
+
+    const handleAddMatch = async (e) => {
+        e.preventDefault();
+        setMessage('');
+        setAlertMessage('');
+
+        if (!selectedMatchDate) {
+            setAlertMessage('Please select a match date.');
+            setShowAlert(true);
+            return;
+        }
+
+        const p1T1Uid = getMemberUid(team1Player1Name);
+        const p2T1Uid = team1Player2Name ? getMemberUid(team1Player2Name) : null;
+        const p1T2Uid = getMemberUid(team2Player1Name);
+        const p2T2Uid = team2Player2Name ? getMemberUid(team2Player2Name) : null;
+
+        const team1Uids = [p1T1Uid].filter(Boolean); // Filter out null if player not found
+        if (p2T1Uid) team1Uids.push(p2T1Uid);
+
+        const team2Uids = [p1T2Uid].filter(Boolean);
+        if (p2T2Uid) team2Uids.push(p2T2Uid);
+
+        // Validation: Ensure all selected players are valid and unique UIDs
+        const allSelectedUids = [...team1Uids, ...team2Uids].filter(Boolean);
+        const uniqueUids = new Set(allSelectedUids);
+
+        if (allSelectedUids.length === 0 || allSelectedUids.length !== uniqueUids.size) {
+            setAlertMessage('Please select unique and valid players for both teams.');
+            setShowAlert(true);
+            return;
+        }
+        
+        // Ensure the current user (adder) is part of the match
+        if (!allSelectedUids.includes(userId)) {
+             setAlertMessage('You must be one of the players in the match you are adding.');
+             setShowAlert(true);
+             return;
+        }
+
+        // Basic score validation
+        if (scoreTeam1 === '' || scoreTeam2 === '') {
+            setAlertMessage('Please enter scores for both teams.');
+            setShowAlert(true);
+            return;
+        }
+        
+        const score1Int = parseInt(scoreTeam1);
+        const score2Int = parseInt(scoreTeam2);
+
+        if (isNaN(score1Int) || isNaN(score2Int) || score1Int < 0 || score2Int < 0) {
+            setAlertMessage('Scores must be non-negative numbers.');
+            setShowAlert(true);
+            return;
+        }
+        
+        // Prevent equal scores (draws) as per Elo system for win/loss
+        if (score1Int === score2Int) {
+            setAlertMessage('Draws are not currently supported. Please enter a winning score for one team.');
+            setShowAlert(true);
+            return;
+        }
+
+
+        try {
+            await addDoc(collection(db, `artifacts/${appId}/public/data/matches`), {
+                date: selectedMatchDate, // Use the selected date (YYYY-MM-DD format from input)
+                team1: team1Uids,
+                team2: team2Uids,
+                score1: score1Int,
+                score2: score2Int,
+                addedBy: userId, // Member who added the match
+                status: 'pending_confirmation', // New status for confirmation
+                confirmedBy: [userId], // Member who added automatically confirms their side
+                createdAt: new Date()
+            });
+            setMessage('Match added successfully! Awaiting confirmation from the other team.');
+            setSelectedMatchDate(''); // Clear date
+            setTeam1Player1Name('');
+            setTeam1Player2Name('');
+            setTeam2Player1Name('');
+            setTeam2Player2Name('');
+            setScoreTeam1('');
+            setScoreTeam2('');
+        } catch (error) {
+            console.error("Error adding match:", error);
+            setAlertMessage('Failed to add match. Please try again.');
+            setShowAlert(true);
+        }
     };
-  
-    const openMatchDetails = (match) => {
-      setSelectedMatchForDetails(match);
-      setShowMatchDetailsModal(true);
-    };
-  
-    // Helper to get member name from Firebase Auth UID
-    const getMemberName = (firebaseAuthUid) => members.find(m => m.firebaseAuthUid === firebaseAuthUid)?.name || 'Unknown Player';
-  
+
+    // Function to handle score confirmation
+    const handleConfirmMatch = useCallback(async (match) => {
+        setMessage('');
+        setAlertMessage('');
+
+        if (!match || !userId) return;
+
+        try {
+            const matchRef = doc(db, `artifacts/${appId}/public/data/matches`, match.id);
+            const currentMatchSnap = await getDoc(matchRef); // Get latest state
+            if (!currentMatchSnap.exists()) {
+                setAlertMessage('Match no longer exists.');
+                setShowAlert(true);
+                return;
+            }
+            const currentMatchData = currentMatchSnap.data();
+
+            let updatedConfirmedBy = new Set(currentMatchData.confirmedBy || []);
+            updatedConfirmedBy.add(userId);
+
+            let newStatus = currentMatchData.status;
+
+            // Determine if all required players have confirmed
+            const allPlayersInMatch = [...currentMatchData.team1, ...currentMatchData.team2];
+            // Ensure every player in the match is in the updatedConfirmedBy set
+            const hasAllPlayersConfirmed = allPlayersInMatch.every(playerUid => updatedConfirmedBy.has(playerUid));
+
+            // If an admin confirms, it overrides player confirmations
+            if (userRole === 'admin') {
+                newStatus = 'confirmed';
+            } else if (hasAllPlayersConfirmed) {
+                newStatus = 'confirmed';
+            } else {
+                newStatus = 'pending_confirmation';
+            }
+
+            await updateDoc(matchRef, {
+                confirmedBy: Array.from(updatedConfirmedBy), // Convert Set back to Array
+                status: newStatus
+            });
+            
+            setMessage('Match score confirmation submitted!');
+            if (newStatus === 'confirmed') {
+                setMessage('Match confirmed! Elo ratings will update shortly.');
+            } else {
+                setMessage('Your confirmation has been recorded. Awaiting other player(s) confirmation.');
+            }
+
+        } catch (error) {
+            console.error("Error confirming match:", error);
+            setAlertMessage('Failed to confirm match. Please try again.');
+            setShowAlert(true);
+        } finally {
+            setShowConfirmModal(false);
+            setMatchToConfirm(null);
+        }
+    }, [db, appId, userId, userRole]); // Add userRole to dependencies
+
+
+    if (loading) {
+        return <div className="text-center text-gray-600">Loading match data...</div>;
+    }
+
+    if (error) {
+        return <div className="text-center text-red-600">Error: {error}</div>;
+    }
+
     return (
-      <div className="bg-white p-8 rounded-2xl shadow-xl max-w-5xl w-full flex flex-col lg:flex-row gap-8 transform transition-all duration-300 ease-in-out hover:scale-105">
-        {/* Left Section: Add New Match */}
-        <div className="flex-1 space-y-6">
-          <h2 className="text-3xl font-bold text-blue-700 mb-4 flex items-center">
-            <PlusCircle className="mr-2 text-green-600" size={32} /> Add New Match
-          </h2>
-          <form onSubmit={handleAddMatch} className="space-y-6">
-            {/* Team 1 Selection */}
-            <div className="bg-blue-50 p-6 rounded-xl shadow-md">
-              <h3 className="text-xl font-semibold text-gray-800 mb-4 flex items-center">
-                <Users className="mr-2 text-blue-600" size={24} /> Team 1
-              </h3>
-              <div>
-                <label htmlFor="team1Player1" className="block text-gray-700 text-sm font-medium mb-2">Player 1</label>
-                <select
-                  id="team1Player1"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200 ease-in-out"
-                  value={team1Player1}
-                  onChange={(e) => setTeam1Player1(e.target.value)}
-                  required
-                >
-                  <option value="">-- Select Player --</option>
-                  {members.map(member => (
-                    <option key={member.firebaseAuthUid} value={member.firebaseAuthUid}>{member.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="mt-4">
-                <label htmlFor="team1Player2" className="block text-gray-700 text-sm font-medium mb-2">Player 2 (Optional)</label>
-                <select
-                  id="team1Player2"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200 ease-in-out"
-                  value={team1Player2}
-                  onChange={(e) => setTeam1Player2(e.target.value)}
-                >
-                  <option value="">-- Select Player --</option>
-                  {members.map(member => (
-                    <option key={member.firebaseAuthUid} value={member.firebaseAuthUid}>{member.name}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-  
-            {/* Team 2 Selection */}
-            <div className="bg-purple-50 p-6 rounded-xl shadow-md">
-              <h3 className="text-xl font-semibold text-gray-800 mb-4 flex items-center">
-                <Users className="mr-2 text-purple-600" size={24} /> Team 2 (Opponent)
-              </h3>
-              <div>
-                <label htmlFor="team2Player1" className="block text-gray-700 text-sm font-medium mb-2">Player 1</label>
-                <select
-                  id="team2Player1"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200 ease-in-out"
-                  value={team2Player1}
-                  onChange={(e) => setTeam2Player1(e.target.value)}
-                  required
-                >
-                  <option value="">-- Select Player --</option>
-                  {members.map(member => (
-                    <option key={member.firebaseAuthUid} value={member.firebaseAuthUid}>{member.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="mt-4">
-                <label htmlFor="team2Player2" className="block text-gray-700 text-sm font-medium mb-2">Player 2 (Optional)</label>
-                <select
-                  id="team2Player2"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200 ease-in-out"
-                  value={team2Player2}
-                  onChange={(e) => setTeam2Player2(e.target.value)}
-                >
-                  <option value="">-- Select Player --</option>
-                  {members.map(member => (
-                    <option key={member.firebaseAuthUid} value={member.firebaseAuthUid}>{member.name}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-  
-            {/* Scores */}
-            <div className="bg-yellow-50 p-6 rounded-xl shadow-md">
-              <h3 className="text-xl font-semibold text-gray-800 mb-4 flex items-center">
-                <Trophy className="mr-2 text-yellow-600" size={24} /> Scores
-              </h3>
-              <div className="flex space-x-4">
-                <div className="flex-1">
-                  <label htmlFor="scoreTeam1" className="block text-gray-700 text-sm font-medium mb-2">Team 1 Score</label>
-                  <input
-                    type="number"
-                    id="scoreTeam1"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200 ease-in-out"
-                    value={scoreTeam1}
-                    onChange={(e) => setScoreTeam1(e.target.value)}
-                    min="0"
-                    required
-                  />
+        <div className="min-h-screen bg-gray-100 p-4 sm:p-6 lg:p-8">
+            <h2 className="text-3xl font-extrabold text-gray-900 text-center mb-8">
+                Match Management
+            </h2>
+
+            {message && (
+                <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-lg relative mb-4" role="alert">
+                    <span className="block sm:inline">{message}</span>
+                    <span className="absolute top-0 bottom-0 right-0 px-4 py-3">
+                        <XCircle className="h-6 w-6 text-green-500 cursor-pointer" onClick={() => setMessage('')} />
+                    </span>
                 </div>
-                <div className="flex-1">
-                  <label htmlFor="scoreTeam2" className="block text-gray-700 text-sm font-medium mb-2">Team 2 Score</label>
-                  <input
-                    type="number"
-                    id="scoreTeam2"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200 ease-in-out"
-                    value={scoreTeam2}
-                    onChange={(e) => setScoreTeam2(e.target.value)}
-                    min="0"
-                    required
-                  />
+            )}
+            {alertMessage && (
+                <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg relative mb-4" role="alert">
+                    <span className="block sm:inline">{alertMessage}</span>
+                    <span className="absolute top-0 bottom-0 right-0 px-4 py-3">
+                        <XCircle className="h-6 w-6 text-red-500 cursor-pointer" onClick={() => setAlertMessage('')} />
+                    </span>
                 </div>
-              </div>
+            )}
+
+            <div className="max-w-4xl mx-auto space-y-8">
+                {/* Add New Match Section */}
+                <div className="bg-white p-6 rounded-2xl shadow-xl space-y-4 rounded-xl">
+                    <h3 className="text-2xl font-bold text-gray-800 text-center">Add New Match</h3>
+                    <form onSubmit={handleAddMatch} className="space-y-4">
+                        <div>
+                            <label htmlFor="matchDate" className="block text-gray-700 text-sm font-bold mb-2">Match Date:</label>
+                            <input
+                                type="date"
+                                id="matchDate"
+                                value={selectedMatchDate}
+                                onChange={(e) => setSelectedMatchDate(e.target.value)}
+                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                required
+                            />
+                        </div>
+                        {selectedMatchDate ? ( // Only show player selection if a date is selected
+                            availablePlayersOnDate.length > 0 ? (
+                                <>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        {/* Team 1 Player 1 */}
+                                        <div>
+                                            <label htmlFor="team1Player1" className="block text-gray-700 text-sm font-bold mb-2">Team 1 Player 1:</label>
+                                            <input
+                                                list="availableMembersList" // Use datalist for suggestions
+                                                id="team1Player1"
+                                                value={team1Player1Name}
+                                                onChange={(e) => setTeam1Player1Name(e.target.value)}
+                                                placeholder="Select player"
+                                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                                required
+                                            />
+                                        </div>
+                                        {/* Team 1 Player 2 (Optional for doubles) */}
+                                        <div>
+                                            <label htmlFor="team1Player2" className="block text-gray-700 text-sm font-bold mb-2">Team 1 Player 2 (Optional):</label>
+                                            <input
+                                                list="availableMembersList"
+                                                id="team1Player2"
+                                                value={team1Player2Name}
+                                                onChange={(e) => setTeam1Player2Name(e.target.value)}
+                                                placeholder="Select player"
+                                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                            />
+                                        </div>
+                                        {/* Team 2 Player 1 */}
+                                        <div>
+                                            <label htmlFor="team2Player1" className="block text-gray-700 text-sm font-bold mb-2">Team 2 Player 1:</label>
+                                            <input
+                                                list="availableMembersList"
+                                                id="team2Player1"
+                                                value={team2Player1Name}
+                                                onChange={(e) => setTeam2Player1Name(e.target.value)}
+                                                placeholder="Select player"
+                                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                                required
+                                            />
+                                        </div>
+                                        {/* Team 2 Player 2 (Optional for doubles) */}
+                                        <div>
+                                            <label htmlFor="team2Player2" className="block text-gray-700 text-sm font-bold mb-2">Team 2 Player 2 (Optional):</label>
+                                            <input
+                                                list="availableMembersList"
+                                                id="team2Player2"
+                                                value={team2Player2Name}
+                                                onChange={(e) => setTeam2Player2Name(e.target.value)}
+                                                placeholder="Select player"
+                                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label htmlFor="scoreTeam1" className="block text-gray-700 text-sm font-bold mb-2">Team 1 Score:</label>
+                                            <input
+                                                type="number"
+                                                id="scoreTeam1"
+                                                value={scoreTeam1}
+                                                onChange={(e) => setScoreTeam1(e.target.value)}
+                                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                                required
+                                                min="0"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label htmlFor="scoreTeam2" className="block text-gray-700 text-sm font-bold mb-2">Team 2 Score:</label>
+                                            <input
+                                                type="number"
+                                                id="scoreTeam2"
+                                                value={scoreTeam2}
+                                                onChange={(e) => setScoreTeam2(e.target.value)}
+                                                className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                                required
+                                                min="0"
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <button
+                                        type="submit"
+                                        className="w-full bg-blue-600 text-white py-2 px-4 rounded-lg shadow-md hover:bg-blue-700 transition duration-200 ease-in-out"
+                                    >
+                                        <PlusCircle className="inline-block mr-2" size={20} /> Add Match
+                                    </button>
+                                </>
+                            ) : (
+                                <p className="text-center text-gray-500">No players available for the selected date.</p>
+                            )
+                        ) : (
+                            <p className="text-center text-gray-500">Select a date to see available players.</p>
+                        )}
+                    </form>
+                </div>
+
+                {/* All Matches Section */}
+                <div className="bg-white p-6 rounded-2xl shadow-xl space-y-4 rounded-xl">
+                    <h3 className="text-2xl font-bold text-gray-800 text-center">All Matches</h3>
+                    {loading ? (
+                        <p className="text-center text-gray-500">Loading matches...</p>
+                    ) : matches.length > 0 ? (
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full bg-white rounded-lg shadow overflow-hidden">
+                                <thead className="bg-gray-100 text-gray-600 uppercase text-sm leading-normal">
+                                    <tr>
+                                        <th className="py-3 px-6 text-left">Date</th>
+                                        <th className="py-3 px-6 text-left">Teams</th>
+                                        <th className="py-3 px-6 text-center">Score</th>
+                                        <th className="py-3 px-6 text-center">Added By</th>
+                                        <th className="py-3 px-6 text-center">Status</th>
+                                        <th className="py-3 px-6 text-center">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="text-gray-600 text-sm font-light">
+                                    {matches.map(match => {
+                                        // Check if current user is involved in the match
+                                        const isCurrentUserInvolved = match.team1.includes(userId) || match.team2.includes(userId);
+                                        // Check if the current user has already confirmed
+                                        const currentUserConfirmed = match.confirmedBy && match.confirmedBy.includes(userId);
+                                        // Determine if "Confirm Score" button should be shown
+                                        const showConfirmButton = match.status === 'pending_confirmation' && 
+                                                                (isCurrentUserInvolved && !currentUserConfirmed) || userRole === 'admin';
+
+                                        return (
+                                            <tr key={match.id} className="border-b border-gray-200 hover:bg-gray-50">
+                                                <td className="py-3 px-6 text-left whitespace-nowrap">
+                                                    {formatSlotDateTime(match.date, 'date')}
+                                                </td>
+                                                <td className="py-3 px-6 text-left">
+                                                    {match.team1.map(getMemberName).join(' & ')} vs {match.team2.map(getMemberName).join(' & ')}
+                                                </td>
+                                                <td className="py-3 px-6 text-center">{match.score1} - {match.score2}</td>
+                                                <td className="py-3 px-6 text-center">{getMemberName(match.addedBy)}</td>
+                                                <td className="py-3 px-6 text-center">
+                                                    <span className={`py-1 px-3 rounded-full text-xs font-medium ${
+                                                        match.status === 'confirmed' ? 'bg-green-200 text-green-800' :
+                                                        'bg-yellow-200 text-yellow-800'
+                                                    }`}>
+                                                        {match.status.replace(/_/g, ' ')}
+                                                    </span>
+                                                    {match.status === 'pending_confirmation' && (
+                                                        <div className="text-xs text-gray-500 mt-1">
+                                                            Confirmed by: {match.confirmedBy.map(getMemberName).join(', ')}
+                                                        </div>
+                                                    )}
+                                                </td>
+                                                <td className="py-3 px-6 text-center flex items-center justify-center space-x-2">
+                                                    <button
+                                                        onClick={() => {
+                                                            setSelectedMatchForDetails(match);
+                                                            setShowMatchDetailsModal(true);
+                                                        }}
+                                                        className="text-blue-600 hover:text-blue-800"
+                                                        title="View Details"
+                                                    >
+                                                        <Info size={18} />
+                                                    </button>
+                                                    {showConfirmButton && (
+                                                        <button
+                                                            onClick={() => {
+                                                                setMatchToConfirm(match);
+                                                                setShowConfirmModal(true);
+                                                            }}
+                                                            className="bg-green-500 text-white p-2 rounded-full hover:bg-green-600 transition duration-200 ease-in-out"
+                                                            title={userRole === 'admin' ? "Admin Confirm" : "Confirm Score"}
+                                                        >
+                                                            <CheckCircle size={18} />
+                                                        </button>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    ) : (
+                        <p className="text-center text-gray-500">No matches recorded yet.</p>
+                    )}
+                </div>
             </div>
-  
-            <button
-              type="submit"
-              className="w-full bg-gradient-to-r from-green-500 to-teal-600 text-white py-3 px-6 rounded-xl text-lg font-semibold shadow-lg hover:from-green-600 hover:to-teal-700 transform hover:-translate-y-1 transition duration-300 ease-in-out flex items-center justify-center"
-            >
-              <PlusCircle className="mr-2" size={20} /> Add Match
-            </button>
-          </form>
-          {message && (
-            <div className={`mt-4 p-3 rounded-lg text-center ${message.includes('success') ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-              {message}
-            </div>
-          )}
+
+            {/* Datalist for available players based on selected date */}
+            <datalist id="availableMembersList">
+                {availablePlayersOnDate.map(member => (
+                    <option key={member.firebaseAuthUid} value={member.name}></option>
+                ))}
+            </datalist>
+
+            {/* Confirmation Modal */}
+            {showConfirmModal && matchToConfirm && (
+                <CustomAlertDialog
+                    title="Confirm Match Score"
+                    message={`Do you want to confirm the score for the match on ${formatSlotDateTime(matchToConfirm.date, 'date')}: ${matchToConfirm.team1.map(getMemberName).join(' & ')} vs ${matchToConfirm.team2.map(getMemberName).join(' & ')}? Score: ${matchToConfirm.score1} - ${matchToConfirm.score2}`}
+                    onConfirm={() => handleConfirmMatch(matchToConfirm)}
+                    onCancel={() => setShowConfirmModal(false)}
+                    confirmText="Confirm"
+                    cancelText="Cancel"
+                />
+            )}
+
+            {/* Match Details Modal */}
+            {showMatchDetailsModal && selectedMatchForDetails && (
+                <MatchDetailsModal
+                    match={selectedMatchForDetails}
+                    members={members}
+                    onClose={() => setShowMatchDetailsModal(false)}
+                />
+            )}
+            {showAlert && (
+                <CustomAlertDialog
+                    message={alertMessage}
+                    onConfirm={() => setShowAlert(false)}
+                    onCancel={() => setShowAlert(false)}
+                    confirmText="Ok"
+                    cancelText="Close"
+                />
+            )}
         </div>
-  
-        {/* Right Section: Match History and Confirmation */}
-        <div className="flex-1 space-y-6">
-          <h3 className="text-3xl font-bold text-blue-700 mb-4 flex items-center">
-            <Bell className="mr-2 text-orange-600" size={32} /> Match History & Confirmations
-          </h3>
-  
-          {matches.length > 0 ? (
-            <ul className="space-y-4">
-              {matches.map(match => (
-                <li key={match.id} className="bg-white p-6 rounded-xl shadow-md border border-gray-200">
-                  <p className="text-sm text-gray-500 mb-2">{match.date}</p>
-                  <h4 className="text-lg font-semibold text-gray-800 mb-2">
-                    {match.team1.map(getMemberName).join(' & ')} vs {match.team2.map(getMemberName).join(' & ')}
-                  </h4>
-                  <p className="text-xl font-bold text-blue-700 mb-3">Score: {match.score1} - {match.score2}</p>
-                  <p className="text-gray-600 text-sm">Added by: {getMemberName(match.addedBy)}</p>
-                  <p className="text-gray-600 text-sm">Confirmed by: {match.confirmedBy.length > 0 ? match.confirmedBy.map(getMemberName).join(', ') : 'None'}</p>
-                  <p className="text-gray-600 text-sm mb-3">Status: <span className={`font-semibold ${match.status === 'confirmed' ? 'text-green-600' : 'text-orange-600'}`}>{match.status.replace('_', ' ')}</span></p>
-  
-                  <div className="flex space-x-2 mt-3">
-                      {/* Confirmation Button */}
-                      {userId && (match.team1.includes(userId) || match.team2.includes(userId)) && !match.confirmedBy.includes(userId) && match.status !== 'confirmed' && (
-                      <button
-                          onClick={() => openConfirmModal(match)}
-                          className="bg-orange-500 text-white px-4 py-2 rounded-lg shadow-md hover:bg-orange-600 transition duration-200 ease-in-out flex items-center justify-center text-sm"
-                      >
-                          <CheckCircle className="mr-2" size={20} /> Confirm Score
-                      </button>
-                      )}
-                      {/* View Details Button */}
-                      <button
-                          onClick={() => openMatchDetails(match)}
-                          className="bg-gray-500 text-white px-4 py-2 rounded-lg shadow-md hover:bg-gray-600 transition duration-200 ease-in-out flex items-center justify-center text-sm"
-                      >
-                          <Info className="mr-2" size={20} /> View Details
-                      </button>
-                  </div>
-  
-                  {/* Notification Placeholder */}
-                  {userId && (match.team1.includes(userId) || match.team2.includes(userId)) && match.status === 'pending_confirmation' && !match.confirmedBy.includes(userId) && (
-                      <div className="mt-3 p-2 bg-yellow-100 text-yellow-800 rounded-lg text-sm flex items-center">
-                          <Bell className="mr-2" size={18} /> You have a pending match to confirm!
-                      </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="text-gray-500">No matches recorded yet.</p>
-          )}
-        </div>
-  
-        {/* Confirmation Modal */}
-        {showConfirmModal && matchToConfirm && (
-          <CustomAlertDialog
-            message={`Are you sure you want to confirm the score for the match on ${matchToConfirm.date}: ${matchToConfirm.team1.map(getMemberName).join(' & ')} vs ${matchToConfirm.team2.map(getMemberName).join(' & ')}? Score: ${matchToConfirm.score1} - ${matchToConfirm.score2}`}
-            onConfirm={() => handleConfirmMatch(matchToConfirm)}
-            onCancel={() => setShowConfirmModal(false)}
-            confirmText="Confirm"
-            cancelText="Cancel"
-          />
-        )}
-  
-        {/* Match Details Modal */}
-        {showMatchDetailsModal && selectedMatchForDetails && (
-          <MatchDetailsModal
-            match={selectedMatchForDetails}
-            members={members}
-            onClose={() => setShowMatchDetailsModal(false)}
-          />
-        )}
-        {showAlert && (
-          <CustomAlertDialog
-            message={alertMessage}
-            onConfirm={() => setShowAlert(false)}
-            onCancel={() => setShowAlert(false)}
-            confirmText="Ok"
-            cancelText="Close"
-          />
-        )}
-      </div>
     );
-  };
-export default MatchManagementPage
+};
+export default MatchManagementPage;
