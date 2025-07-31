@@ -1,18 +1,23 @@
 import React, { useState, useEffect, useContext, useCallback } from 'react';
 import { 
-    doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, getDocs, deleteDoc, addDoc 
+    doc, getDoc, setDoc, updateDoc, orderBy, limit, onSnapshot, collection, query, where, getDocs, deleteDoc, addDoc 
 } from 'firebase/firestore';
+
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { 
     Trophy, DollarSign, Info, PlusCircle, Calendar, Edit, XCircle, Bell, List
 } from 'lucide-react';
+import { getMessaging, getToken, onMessage } from "firebase/messaging"; // NEW IMPORT
 import CustomAlertDialog from '../components/CustomAlertDialog';
 import { AppContext } from '../App';
 import { formatSlotDateTime } from '../utils/datehelpers';
 import { getMemberName } from '../utils/memberhelpers';
 
 const MemberDashboard = () => {
-    const { db, userId, isAuthenticated, isAuthReady, appId, userData, setUserData, functions } = useContext(AppContext);
+    const { 
+        db, userId, isAuthenticated, isAuthReady, appId, userData, setUserData, functions,
+        setFcmMessageDisplayCallback // Get this setter from AppContext
+    } = useContext(AppContext);
 
     const [balance, setBalance] = useState(userData?.balance || 0);
     const [scores, setScores] = useState(userData?.scores || []);
@@ -23,7 +28,6 @@ const MemberDashboard = () => {
     const [matches, setMatches] = useState([]);
     const [appSettings, setAppSettings] = useState(null);
     const [message, setMessage] = useState('');
-    const [showBookingModal, setShowBookingModal] = useState(false);
     const [selectedSlotForBooking, setSelectedSlotForBooking] = useState(null);
     const [showEditProfileModal, setShowEditProfileModal] = useState(false);
     const [newUserName, setNewUserName] = useState(userData?.name || '');
@@ -32,7 +36,8 @@ const MemberDashboard = () => {
     const [alertMessage, setAlertMessage] = useState('');
     const [alertDialogOnConfirm, setAlertDialogOnConfirm] = useState(null);
     const [alertDialogOnCancel, setAlertDialogOnCancel] = useState(null);
-
+    const [myWaitingListEntries, setMyWaitingListEntries] = useState([]);
+    const [transactions, setTransactions] = useState([]);
     const [loadingDashboard, setLoadingDashboard] = useState(true);
     const [isBookingSlot, setIsBookingSlot] = useState(false);
     const [isCancellingBooking, setIsCancellingBooking] = useState(false);
@@ -44,6 +49,7 @@ const MemberDashboard = () => {
     const [allMembers, setAllMembers] = useState([]);
     const [filteredSlots, setFilteredSlots] = useState([]);
     const [availableSlotCount, setAvailableSlotCount] = useState(0);
+    const [fcmToken, setFcmToken] = useState(null); // NEW STATE
 
     const appSettingsDocId = 'settings'; 
     const [currentUserRole, setCurrentUserRole] = useState(null);
@@ -137,18 +143,36 @@ const MemberDashboard = () => {
         const unsubscribeSlots = onSnapshot(slotsRef, (snapshot) => {
             const allFetchedSlots = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
-            setSlots(allFetchedSlots); // Update main 'slots' state with ALL slots
-
-            // Sort ALL fetched slots by timestamp for consistent grouping and display order
+            setSlots(allFetchedSlots); 
             allFetchedSlots.sort((a, b) => (a.timestamp?.toDate() || new Date(0)) - (b.timestamp?.toDate() || new Date(0)));
+            setFilteredSlots(allFetchedSlots);
+            setAvailableSlotCount(allFetchedSlots.filter(slot => !slot.isBooked && (slot.timestamp?.toDate() || new Date()) >= new Date()).length); 
 
-            setFilteredSlots(allFetchedSlots); // filteredSlots now holds ALL slots
-            setAvailableSlotCount(allFetchedSlots.filter(slot => !slot.isBooked && (slot.timestamp?.toDate() || new Date()) >= new Date()).length); // Count only future available slots
+            // NEW: Fetch waiting list entries to determine slot status
+            const waitingListCollectionRef = collection(db, `artifacts/${appId}/public/data/waitingLists`);
+            const waitingListQuery = query(waitingListCollectionRef, where("users", "array-contains", userId));
+            getDocs(waitingListQuery).then(waitlistSnapshot => {
+                const fetchedWaitingList = waitlistSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                setMyWaitingListEntries(fetchedWaitingList); // Store waiting list entries
 
-            // Set slots booked by the current user
-            setMyBookedSlots(allFetchedSlots.filter(slot => 
-                slot.bookedBy === userId && slot.isBooked && (slot.timestamp?.toDate() || new Date()) >= new Date() // Only future/current booked slots
-            ).sort((a,b) => (a.timestamp?.toDate() || new Date(0)) - (b.timestamp?.toDate() || new Date(0))));
+                // Filter and set slots booked by the current user, including waiting list status
+                const bookedAndWaitingSlots = allFetchedSlots.filter(slot => {
+                    const isBookedByUser = slot.bookedBy === userId && slot.isBooked;
+                    const isUserOnWaitlistForSlot = fetchedWaitingList.some(wl => wl.slotId === slot.id && wl.users[0] === userId); // Check if user is on waitlist AND first in line
+
+                    return (isBookedByUser || isUserOnWaitlistForSlot) && (slot.timestamp?.toDate() || new Date()) >= new Date();
+                }).map(slot => {
+                    // Determine status for display
+                    const isUserOnWaitlistForSlot = fetchedWaitingList.some(wl => wl.slotId === slot.id && wl.users[0] === userId);
+                    return {
+                        ...slot,
+                        statusDisplay: slot.isBooked ? 'Confirmed' : (isUserOnWaitlistForSlot ? 'Waiting List' : 'Unknown')
+                    };
+                }).sort((a,b) => (a.timestamp?.toDate() || new Date(0)) - (b.timestamp?.toDate() || new Date(0)));
+
+                setMyBookedSlots(bookedAndWaitingSlots);
+
+            }).catch(error => console.error("Error fetching waiting list for booked slots:", error));
         }, (error) => console.error("Error fetching slots:", error));
 
         // 3. Listen for waiting list notifications specific to this user
@@ -223,6 +247,16 @@ const MemberDashboard = () => {
             }
         }, (error) => console.error("Error fetching member app settings:", error));
 
+        // ... inside useEffect for data fetching
+
+            // 7. Listen for user's transaction history
+            const transactionsRef = collection(db, `artifacts/${appId}/users/${userId}/transactions`);
+            const qTransactions = query(transactionsRef, orderBy('timestamp', 'desc'), limit(20)); // Limit to last 20 for performance
+            const unsubscribeTransactions = onSnapshot(qTransactions, (snapshot) => {
+                const fetchedTransactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                setTransactions(fetchedTransactions);
+            }, (error) => console.error("Error fetching transaction history:", error));
+
         return () => {
             unsubscribeProfile();
             unsubscribeSlots();
@@ -264,96 +298,158 @@ const MemberDashboard = () => {
         }
     }, [db, userId, appId, loadingRole, currentUserRole]);
 
+    // EFFECT 4: Register FCM Message Display Callback
+    useEffect(() => {
+        // This function will be called by setupNotifications in App.js
+        const handleFCMMessage = (payload) => {
+            const { notification, data } = payload;
 
-    // --- Event Handlers ---
+            let displayMessage = '';
+            if (notification && notification.body) {
+                displayMessage = notification.body;
+            } else if (data && data.message) {
+                displayMessage = data.message;
+            }
+
+            // Determine if it should be a simple message or trigger AlertDialog
+            if (data && data.type) {
+                switch (data.type) {
+                    case 'slot_available_game_day':
+                    case 'slot_available_priority':
+                        setMessage(`Action required: A slot on ${data.date} at ${data.time} is now available!`);
+                        break;
+                    case 'slot_refund_direct_rebook':
+                    case 'slot_refund_replacement':
+                        setMessage(`Refund Processed: Your cancelled slot on ${data.date} at ${data.time} was re-booked. Amount: ${data.amount}€`);
+                        // Refresh user balance immediately
+                        const userProfileRef = doc(db, `artifacts/${appId}/users/${userId}/profile/data`);
+                        getDoc(userProfileRef).then(docSnap => {
+                            if (docSnap.exists()) setUserData(docSnap.data());
+                        }).catch(err => console.error("Error fetching user data after refund:", err));
+                        break;
+                    case 'cancellation_fee_charged':
+                        setMessage(`Cancellation Finalized: Your slot on ${data.date} at ${data.time} was not re-booked. No refund issued.`);
+                        break;
+                    default:
+                        console.log("Unhandled FCM data type:", data.type);
+                        setAlertMessage(displayMessage); // Fallback to AlertDialog for unknown types
+                        setShowAlert(true);
+                }
+            } else if (displayMessage) {
+                // If there's a notification body but no specific data.type, use AlertDialog
+                setAlertMessage(displayMessage);
+                setShowAlert(true);
+            }
+        };
+
+        // Register this callback with App.js's context
+        if (setFcmMessageDisplayCallback) {
+            setFcmMessageDisplayCallback(handleFCMMessage);
+        }
+
+        // Cleanup: Deregister the callback when component unmounts
+        return () => {
+            if (setFcmMessageDisplayCallback) {
+                setFcmMessageDisplayCallback(null);
+            }
+        };
+    }, [db, appId, userId, setUserData, setFcmMessageDisplayCallback, setMessage, setAlertMessage, setShowAlert]); // These are your local setters, so they are correct dependencies// --- Event Handlers ---
 
     const handleBookSlot = async (slotId, slotDateTimeInput) => {
-        setMessage('');
-        setAlertMessage('');
+        // Remove setMessage('') and setAlertMessage('') here.
         if (!db || !userId || !functions || !appSettings) return;
 
         const slotCost = appSettings.slotBookingCost || 4;
+        const formattedDateTime = formatSlotDateTime(slotDateTimeInput, 'full', new Date(slotDateTimeInput).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }));
 
+        // Use setAlertMessage and setShowAlert for the confirmation dialog
         setAlertMessage(
-            `Confirm booking for ${formatSlotDateTime(slotDateTimeInput, 'date')} at ${formatSlotDateTime(slotDateTimeInput, 'time', new Date(slotDateTimeInput).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }))}? ` +
-            `A fee of ${slotCost} EUR will be deducted from your balance.`
+            `Confirm booking for ${formattedDateTime}? ` +
+            `A fee of ${slotCost} EUR will be deducted from your balance. If the slot is full, you will be added to the waiting list.`
         );
         setShowAlert(true);
         setAlertDialogOnConfirm(() => async () => {
-            setShowAlert(false);
+            setShowAlert(false); // Close the confirmation alert
             setIsBookingSlot(true);
             try {
                 const bookSlotCallable = httpsCallable(functions, 'bookSlot');
                 const result = await bookSlotCallable({ slotId: slotId, appId: appId });
 
                 if (result.data.success) {
-                    setMessage(result.data.message || 'Slot booked successfully!');
+                    if (result.data.waitlistPosition) {
+                        // User added to waitlist, use setMessage for a simple toast
+                        setMessage(`Slot is full. You have been added to the waiting list. Your position: ${result.data.waitlistPosition}. You will be notified if it becomes available.`);
+                    } else {
+                        // Slot booked successfully, use setMessage for a simple toast
+                        setMessage(result.data.message || 'Slot booked successfully!');
+                    }
                 } else {
-                    setAlertMessage(`Error booking slot: ${result.data.message || 'Unknown error.'}`);
-                    setShowAlert(true);
+                    // Booking failed, use setAlertMessage for a prominent error
+                    setAlertMessage(`Booking failed: ${result.data.message || 'Unknown error.'}`);
+                    setShowAlert(true); // Show error alert
                 }
             } catch (error) {
                 console.error("Error booking slot:", error);
-                setAlertMessage(`Error booking slot: ${error.message}`);
-                setShowAlert(true);
+                setAlertMessage(`Failed to book slot: ${error.message}`);
+                setShowAlert(true); // Show error alert
             } finally {
                 setIsBookingSlot(false); // Reset loading state
                 setAlertDialogOnConfirm(null); // Clear confirm action
                 setAlertDialogOnCancel(null); // Clear cancel action
-                setShowBookingModal(false); // Close booking modal
             }
         });
         setAlertDialogOnCancel(() => () => {
-            setShowAlert(false);
-            setSelectedSlotForBooking(null);
+            setShowAlert(false); // Close the confirmation alert
+            // setSelectedSlotForBooking(null); // This state isn't managed by this context.
             setAlertDialogOnConfirm(null);
             setAlertDialogOnCancel(null);
         });
     };
 
     const handleCancelBooking = async (slotId, slotDateTimeInput) => {
-        setMessage('');
-        setAlertMessage('');
+        // Remove setMessage('') and setAlertMessage('') here.
         if (!db || !userId || !functions) return;
 
-        const confirmed = await new Promise(resolve => {
-            setAlertMessage(`Are you sure you want to cancel the slot on ${formatSlotDateTime(slotDateTimeInput, 'full')}?`);
-            setShowAlert(true);
-            setAlertDialogOnConfirm(() => () => {
-                setShowAlert(false);
-                resolve(true);
-            });
-            setAlertDialogOnCancel(() => () => {
-                setShowAlert(false);
-                resolve(false);
-            });
-        });
-    
-        if (!confirmed) {
-            return;
-        }
-    
-        setIsCancellingBooking(true);
-        try {
-            const cancelSlotCallable = httpsCallable(functions, 'cancelSlot');
-            const result = await cancelSlotCallable({ slotId: slotId, appId: appId });
+        const formattedDateTime = formatSlotDateTime(slotDateTimeInput, 'full');
 
-            if (result.data.success) {
-                setMessage(result.data.message || 'Slot cancelled successfully!');
-            } else {
-                setAlertMessage(`Failed to cancel slot: ${result.data.message || 'Unknown error.'}`);
+        // Use setAlertMessage and setShowAlert for the confirmation dialog
+        setAlertMessage(
+            `Are you sure you want to cancel the slot on ${formattedDateTime}? ` +
+            `Your refund will be processed if a replacement player books the slot.`
+        );
+        setShowAlert(true);
+        setAlertDialogOnConfirm(() => async () => {
+            setIsCancellingBooking(true);
+            setShowAlert(false); // Close the notification component immediately on confirm
+            try {
+                const cancelSlotCallable = httpsCallable(functions, 'cancelSlot');
+                const result = await cancelSlotCallable({ slotId: slotId, appId: appId });
+
+                if (result.data.success) {
+                    // Cancellation success, use setMessage for a simple toast
+                    setMessage(result.data.message || 'Slot cancellation requested! Refund will be processed if a replacement is found.');
+                } else {
+                    // Cancellation failed, use setAlertMessage for a prominent error
+                    setAlertMessage(`Failed to cancel slot: ${result.data.message || 'Unknown error.'}`);
+                    setShowAlert(true);
+                }
+            } catch (error) {
+                console.error("Error cancelling slot:", error);
+                setAlertMessage(`Error cancelling slot: ${error.message}`);
                 setShowAlert(true);
+            } finally {
+                setIsCancellingBooking(false); // Reset loading state
+                setAlertDialogOnConfirm(null);
+                setAlertDialogOnCancel(null);
             }
-        } catch (error) {
-            console.error("Error cancelling slot:", error);
-            setAlertMessage(`Error cancelling slot: ${error.message}`);
-            setShowAlert(true);
-        } finally {
-            setIsCancellingBooking(false); // Reset loading state
+        });
+        setAlertDialogOnCancel(() => () => {
+            setShowAlert(false); // Close the notification component on cancel
             setAlertDialogOnConfirm(null);
             setAlertDialogOnCancel(null);
-        }
+        });
     };
+
 
     const handleUpdateUserName = async () => {
         setMessage('');
@@ -420,64 +516,12 @@ const MemberDashboard = () => {
         }
     };
 
-    const handleJoinWaitingList = async (slotDateTimeInput) => {
-        setMessage('');
-        setAlertMessage('');
-
-        if (!userId || !db || !appId) {
-            setAlertMessage("User, Database or App ID not ready.");
-            setShowAlert(true);
-            return;
+    const scrollToSection = useCallback((sectionId) => {
+        const section = document.getElementById(sectionId);
+        if (section) {
+            section.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
-
-        let slotDateObj;
-        if (slotDateTimeInput.toDate) {
-            slotDateObj = slotDateTimeInput.toDate();
-        } else if (typeof slotDateTimeInput === 'string' || typeof slotDateTimeInput === 'number') {
-            slotDateObj = new Date(slotDateTimeInput);
-        } else if (slotDateTimeInput instanceof Date) {
-            slotDateObj = slotDateTimeInput;
-        } else {
-            setAlertMessage("Invalid slot date/time provided for waiting list.");
-            setShowAlert(true);
-            return;
-        }
-
-        const slotDate = slotDateObj.toISOString().split('T')[0];
-        const slotTime = slotDateObj.toTimeString().split(' ')[0].substring(0, 5);
-        const waitingListId = `${slotDate}_${slotTime}`;
-
-        try {
-            const waitingListDocRef = doc(db, `artifacts/${appId}/public/data/waitingLists`, waitingListId);
-            const waitingListSnap = await getDoc(waitingListDocRef);
-
-            if (waitingListSnap.exists()) {
-                const waitingListData = waitingListSnap.data();
-                if (waitingListData.users && waitingListData.users.includes(userId)) {
-                    setAlertMessage('You are already on the waiting list for this slot.');
-                    setShowAlert(true);
-                    return;
-                }
-                await updateDoc(waitingListDocRef, {
-                    users: [...(waitingListData.users || []), userId],
-                    slotAvailable: false // This flag should be set by a Cloud Function when a slot becomes available
-                });
-            } else {
-                await setDoc(waitingListDocRef, {
-                    date: slotDate,
-                    time: slotTime,
-                    users: [userId],
-                    slotAvailable: false
-                });
-            }
-            setMessage(`You have joined the waiting list for the slot on ${formatSlotDateTime(slotDateTimeInput, 'full')}.`);
-        } catch (error) {
-            console.error("Error joining waiting list:", error);
-            setAlertMessage('Failed to join waiting list. Please try again.');
-            setShowAlert(true);
-        }
-    };
-
+    }, []);
 
     if (!isAuthReady || loadingDashboard || loadingRole) {
         return (
@@ -521,12 +565,19 @@ const MemberDashboard = () => {
                 />
             )}
 
-            <div className="max-w-4xl mx-auto space-y-8">
                 <div className="bg-white p-6 rounded-2xl shadow-xl flex flex-col sm:flex-row items-center justify-between rounded-xl">
                     <div className="text-center sm:text-left mb-4 sm:mb-0">
                         <h3 className="text-2xl font-bold text-gray-800">Welcome, {userData?.name || 'Member'}!</h3>
                         <p className="text-gray-600">Your current balance: <span className="font-semibold text-blue-600">{balance} €</span></p>
-                        <p className="text-gray-600">Your Elo Rating: <span className="font-semibold text-purple-600">{eloRating}</span></p>
+                        {/* New: Transaction History Link */}
+                        <button
+                            onClick={() => scrollToSection('transaction-history-section')}
+                            className="text-blue-600 hover:text-blue-800 text-sm font-medium underline mt-1 inline-flex items-center"
+                        >
+                            <List size={16} className="mr-1" /> View Transaction History
+                        </button>
+                        <p className="text-gray-600 mt-2">Your Elo Rating: <span className="font-semibold text-purple-600">{eloRating}</span></p>
+                        <p className="text-gray-600">Your Grade: <span className="font-semibold text-purple-600">{getGrade(eloRating)}</span></p>
                         <p className="text-gray-600">Games Played: <span className="font-semibold text-orange-600">{userData?.gamesPlayed || 0}</span></p>
                         <p className="text-gray-600">Wins: <span className="font-semibold text-green-600">{userData?.wins || 0}</span></p>
                         <p className="text-gray-600">Losses: <span className="font-semibold text-red-600">{userData?.losses || 0}</span></p>
@@ -548,6 +599,7 @@ const MemberDashboard = () => {
                         </button>
                     </div>
                 </div>
+                
 
                 {waitingListMessages.length > 0 && (
                     <div className="bg-blue-50 p-6 rounded-2xl shadow-xl rounded-xl">
@@ -571,6 +623,7 @@ const MemberDashboard = () => {
                                     <tr>
                                         <th className="py-3 px-6 text-left">Date</th>
                                         <th className="py-3 px-6 text-left">Time</th>
+                                        <th className="py-3 px-6 text-left">Status</th> {/* Added Status column */}
                                         <th className="py-3 px-6 text-center">Actions</th>
                                     </tr>
                                 </thead>
@@ -583,15 +636,27 @@ const MemberDashboard = () => {
                                             <td className="py-3 px-6 text-left">
                                                 {formatSlotDateTime(slot.timestamp, 'time', slot.time)}
                                             </td>
+                                            <td className="py-3 px-6 text-left">
+                                                <span className={`px-2 py-1 rounded-full text-xs font-semibold 
+                                                    ${slot.statusDisplay === 'Confirmed' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                                                    {slot.statusDisplay}
+                                                </span>
+                                            </td> {/* Display status here */}
                                             <td className="py-3 px-6 text-center">
-                                                <button
-                                                    onClick={() => handleCancelBooking(slot.id, slot.timestamp?.toDate() || `${slot.date}T${slot.time}:00`)}
-                                                    className="bg-red-500 text-white p-2 rounded-full hover:bg-red-600 transition duration-200 ease-in-out"
-                                                    title="Cancel Booking"
-                                                    disabled={isCancellingBooking}
-                                                >
-                                                    <XCircle size={18} />
-                                                </button>
+                                                {slot.statusDisplay === 'Confirmed' && ( // Only show cancel for confirmed slots
+                                                    <button
+                                                        onClick={() => handleCancelBooking(slot.id, slot.timestamp?.toDate() || `${slot.date}T${slot.time}:00`)}
+                                                        className="bg-red-500 text-white p-2 rounded-full hover:bg-red-600 transition duration-200 ease-in-out"
+                                                        title="Cancel Booking"
+                                                        disabled={isCancellingBooking}
+                                                    >
+                                                        <XCircle size={18} />
+                                                    </button>
+                                                )}
+                                                {slot.statusDisplay === 'Waiting List' && ( // Maybe add an option to leave waiting list
+                                                    <span className="text-gray-500 italic text-sm">Waiting...</span>
+                                                    // You could add a button here to `leaveWaitingList` if you implement such a Cloud Function
+                                                )}
                                             </td>
                                         </tr>
                                     ))}
@@ -599,16 +664,18 @@ const MemberDashboard = () => {
                             </table>
                         </div>
                     ) : (
-                        <p className="text-center text-gray-500">You have no upcoming booked slots.</p>
+                        <p className="text-center text-gray-500">You have no upcoming booked slots or waiting list entries.</p>
                     )}
                 </div>
 
                 <div className="bg-white p-6 rounded-2xl shadow-xl space-y-4 rounded-xl">
-                    <h3 className="text-2xl font-bold text-gray-800 text-center">Available Slots</h3>
+                    <h3 className="text-2xl font-bold text-gray-800 text-center">
+                        Available Slots ({availableSlotCount}) {/* Display the count here */}
+                    </h3>
                     {slots.filter(s => s.available && !s.isBooked && (s.timestamp?.toDate() || new Date()) >= new Date()).length > 0 ? (
-                        <div className="overflow-x-auto">
+                        <div className="overflow-x-auto max-h-80 custom-scrollbar"> {/* Added max-h-80 and custom-scrollbar */}
                             <table className="min-w-full bg-white rounded-lg shadow overflow-hidden">
-                                <thead className="bg-gray-100 text-gray-600 uppercase text-sm leading-normal">
+                                <thead className="bg-gray-100 text-gray-600 uppercase text-sm leading-normal sticky top-0 bg-gray-100"> {/* Added sticky top-0 */}
                                     <tr>
                                         <th className="py-3 px-6 text-left">Date</th>
                                         <th className="py-3 px-6 text-left">Time</th>
@@ -632,13 +699,6 @@ const MemberDashboard = () => {
                                                     disabled={isBookingSlot}
                                                 >
                                                     <PlusCircle size={18} />
-                                                </button>
-                                                <button
-                                                    onClick={() => handleJoinWaitingList(slot.timestamp?.toDate() || `${slot.date}T${slot.time}:00`)}
-                                                    className="bg-yellow-500 text-white p-2 rounded-full hover:bg-yellow-600 transition duration-200 ease-in-out"
-                                                    title="Join Waiting List"
-                                                >
-                                                    <List size={18} />
                                                 </button>
                                             </td>
                                         </tr>
@@ -697,7 +757,44 @@ const MemberDashboard = () => {
                 ) : (
                     <p className="text-gray-600 text-center py-8 bg-gray-50 rounded-lg">No matches involving you found yet.</p>
                 )}
-            </div>
+                
+                <div id="transaction-history-section" className="bg-white p-6 rounded-2xl shadow-xl space-y-4 rounded-xl"> {/* Added ID here */}
+                    <h3 className="text-2xl font-bold text-gray-800 text-center">Transaction History</h3>
+                    {transactions.length > 0 ? (
+                        <div className="overflow-x-auto max-h-96 custom-scrollbar">
+                            <table className="min-w-full bg-white rounded-lg shadow overflow-hidden">
+                                <thead className="bg-gray-100 text-gray-600 uppercase text-sm leading-normal sticky top-0 bg-gray-100">
+                                    <tr>
+                                        <th className="py-3 px-6 text-left">Date & Time</th>
+                                        <th className="py-3 px-6 text-left">Type</th>
+                                        <th className="py-3 px-6 text-left">Description</th>
+                                        <th className="py-3 px-6 text-right">Amount (€)</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="text-gray-600 text-sm font-light">
+                                    {transactions.map(transaction => (
+                                        <tr key={transaction.id} className="border-b border-gray-200 hover:bg-gray-50">
+                                            <td className="py-3 px-6 text-left whitespace-nowrap">
+                                                {formatSlotDateTime(transaction.timestamp, 'full')}
+                                            </td>
+                                            <td className="py-3 px-6 text-left">
+                                                {transaction.type.replace(/_/g, ' ')}
+                                            </td>
+                                            <td className="py-3 px-6 text-left">
+                                                {transaction.description}
+                                            </td>
+                                            <td className={`py-3 px-6 text-right font-semibold ${transaction.amount < 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                                {transaction.amount.toFixed(2)}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    ) : (
+                        <p className="text-center text-gray-500">No transaction history available.</p>
+                    )}
+                </div>
 
             {showEditProfileModal && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">

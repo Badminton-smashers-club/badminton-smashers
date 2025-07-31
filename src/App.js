@@ -33,6 +33,10 @@ const App = () => {
   const [isDbReady, setIsDbReady] = useState(false); // Indicates db is connected
   const [firebaseAppInstance, setFirebaseAppInstance] = useState(null); // <--- ADD THIS LINE
   const [functions, setFunctions] = useState(null); // <-- ADD THIS LINE
+  const fcmMessageDisplayCallbackRef = React.useRef(null); // Ref to store the callback
+  const setFcmMessageDisplayCallback = React.useCallback((callback) => {
+      fcmMessageDisplayCallbackRef.current = callback;
+    }, []);
 
   // [NEW] Add userData state here
   const [userData, setUserData] = useState(null); // To store the full user profile data
@@ -162,6 +166,30 @@ const App = () => {
       }
   }, [isAuthenticated, auth, db, userId, appId, firebaseAppInstance]);
   
+  useEffect(() => {
+    if (firebaseAppInstance && auth && db && userId && appId && isAuthenticated && isAuthReady) {
+        // Your VAPID key (get this from Firebase Project Settings -> Cloud Messaging -> Web Push certificates)
+        const VAPID_KEY = 'BHGE-JYDTyupqstVTxjxJEYvnyCMnbpvlBjRoeXAJwX6-_cw5aUUxGcocUKvbiPnL8M2-B5Uj9DhR-7XYSrnN8A'; // <--- REPLACE THIS
+
+        setupNotifications(firebaseAppInstance, auth, db, userId, appId, VAPID_KEY, (payload) => {
+            // This is the callback that setupNotifications will call when a message is received
+            if (fcmMessageDisplayCallbackRef.current) {
+                fcmMessageDisplayCallbackRef.current(payload);
+            } else {
+                console.warn("FCM message received but no display callback registered in MemberDashboard.js.");
+                // Optionally, fallback to a native browser notification here if no UI is active
+                if (payload.notification) {
+                    new Notification(payload.notification.title || 'Notification', {
+                        body: payload.notification.body,
+                        icon: payload.notification.icon || '/firebase-logo.png'
+                    });
+                }
+            }
+        });
+    }
+  }, [firebaseAppInstance, auth, db, userId, appId, isAuthenticated, isAuthReady]);
+
+
   const navigate = (page) => {
     setCurrentPage(page);
   };

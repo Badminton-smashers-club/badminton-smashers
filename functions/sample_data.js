@@ -1,11 +1,11 @@
 // populateFirestore.js
 const admin = require('firebase-admin');
-const { addDays, setHours, setMinutes } = require('date-fns');
+const { addDays, setHours, setMinutes, subDays } = require('date-fns');
 
 // Initialize Firebase Admin SDK
 try {
     admin.initializeApp({
-        projectId: 'smashers-badminton' // Use your project ID for emulator
+        projectId: 'smashers-badminton'
     });
 } catch (e) {
     if (!e.message.includes('already exists')) {
@@ -14,23 +14,22 @@ try {
 }
 
 const db = admin.firestore();
-const auth = admin.auth(); // Initialize Firebase Auth Admin
-const appId = 'smashers-badminton'; // Your application ID - ensure this matches your frontend's appId
+const auth = admin.auth();
+const appId = 'smashers-badminton';
 
 const populateData = async () => {
     console.log("Starting Firestore & Auth dummy data population...");
 
     const batch = db.batch();
-    const createdAuthUsers = []; // To store UIDs of created Auth users
+    const createdAuthUsers = [];
 
     // --- 1. App Settings ---
     const appSettingsRef = db.doc(`artifacts/${appId}/public/data/appSettings/settings`);
     batch.set(appSettingsRef, {
-        slotBookingCost: 5,
-        cancellationFee: 2,
-        cancellationDeadlineHours: 2, // 2 hours before slot
+        slotBookingCost: 4,
+        cancellationDeadlineHours: 1,
         topUpLink: 'https://example.com/mock-topup-gateway',
-        minBalanceForBooking: 3
+        minBalanceForBooking: 4
     });
     console.log("App settings added.");
 
@@ -39,7 +38,7 @@ const populateData = async () => {
     const numMembers = 20;
     const adminEmail = 'admin@example.com';
     const adminPassword = 'password123';
-    const defaultMemberPassword = 'password123'; // Common password for all members
+    const defaultMemberPassword = 'password123';
 
     for (let i = 0; i < numMembers; i++) {
         const name = i === 0 ? 'Admin User' : `Member ${i}`;
@@ -53,7 +52,7 @@ const populateData = async () => {
                 email: email,
                 password: i === 0 ? adminPassword : defaultMemberPassword,
                 displayName: name,
-                emailVerified: true // Mark as verified for convenience
+                emailVerified: true
             });
             console.log(`Created Auth user: ${email} with UID: ${authUserRecord.uid}`);
             createdAuthUsers.push(authUserRecord.uid);
@@ -63,19 +62,19 @@ const populateData = async () => {
                 authUserRecord = await auth.getUserByEmail(email);
             } else {
                 console.error(`Error creating Auth user ${email}:`, authError);
-                // Optionally, skip this user or throw error
                 continue;
             }
         }
 
-        const uid = authUserRecord.uid; // Use the Auth UID as the primary identifier
-        const eloRating = Math.floor(Math.random() * (1600 - 1000 + 1)) + 1000; // 1000-1600
+        const uid = authUserRecord.uid;
+        const eloRating = Math.floor(Math.random() * (1600 - 1000 + 1)) + 1000;
         const balance = Math.floor(Math.random() * (50 - 5 + 1)) + 5; // 5-50 EUR
         const gamesPlayed = Math.floor(Math.random() * 30);
         const wins = Math.floor(Math.random() * gamesPlayed);
         const losses = gamesPlayed - wins;
+        const draws = gamesPlayed - wins - losses >= 0 ? gamesPlayed - wins - losses : 0;
 
-        members.push({ uid, name, email, role, eloRating, balance, gamesPlayed, wins, losses });
+        members.push({ uid, name, email, role, eloRating, balance, gamesPlayed, wins, losses, draws });
 
         // Public User Profile (Document ID is now the Auth UID)
         const publicUserRef = db.doc(`artifacts/${appId}/public/data/users/${uid}`);
@@ -87,22 +86,24 @@ const populateData = async () => {
             gamesPlayed,
             wins,
             losses,
-            balance,
-            firebaseAuthUid: uid // Explicitly store Auth UID
+            draws,
+            balance, // Set the random balance here
+            firebaseAuthUid: uid
         });
 
         // Private User Profile (Document ID is now the Auth UID)
         const privateProfileRef = db.doc(`artifacts/${appId}/users/${uid}/profile/data`);
         batch.set(privateProfileRef, {
             name,
-            balance,
+            balance, // Set the random balance here as well
             eloRating,
             gamesPlayed,
             wins,
             losses,
+            draws,
             hasMadeFirstBooking: Math.random() > 0.5,
             lastTopUpTimestamp: Math.random() > 0.7 ? admin.firestore.FieldValue.serverTimestamp() : null,
-            fcmToken: `dummyFcmToken_${uid}` // Dummy FCM token for notifications
+            fcmToken: `dummyFcmToken_${uid}`
         });
     }
     console.log(`${members.length} members (and Auth users) added/updated.`);
@@ -115,27 +116,38 @@ const populateData = async () => {
     // Generate future slots
     for (let d = 0; d < numDays; d++) {
         const currentDay = addDays(now, d);
-        for (let hour = 9; hour <= 21; hour += 1) { // 9 AM to 9 PM, every hour
+        for (let hour = 9; hour <= 21; hour += 1) {
             const slotTime = setMinutes(setHours(currentDay, hour), 0);
-            const slotId = `${slotTime.toISOString().split('T')[0]}_${hour.toString().padStart(2, '0')}00`; // YYYY-MM-DD_HHMM
+            const slotId = `${slotTime.toISOString().split('T')[0]}_${hour.toString().padStart(2, '0')}00`;
 
             let isBooked = false;
             let bookedBy = null;
             let available = true;
             let preBooked = false;
+            let cancelledBy = null;
+            let cancellationTimestamp = null;
 
             // Randomly book some slots
-            if (Math.random() < 0.3) { // 30% chance to be booked
+            if (Math.random() < 0.3) {
                 isBooked = true;
-                // Ensure bookedBy is one of the Auth UIDs
                 bookedBy = members[Math.floor(Math.random() * members.length)].uid;
                 available = false;
-            } else if (Math.random() < 0.1) { // 10% chance to be pre-booked (for admin)
+            } else if (Math.random() < 0.1) {
                 isBooked = true;
-                bookedBy = members.find(m => m.email === adminEmail)?.uid; // Find admin's actual Auth UID
-                if (!bookedBy) bookedBy = members[0].uid; // Fallback
+                bookedBy = members.find(m => m.email === adminEmail)?.uid;
+                if (!bookedBy) bookedBy = members[0].uid;
                 available = false;
                 preBooked = true;
+            }
+
+            // Randomly cancel some booked slots (for future slots only)
+            if (isBooked && d > 0 && Math.random() < 0.2) {
+                cancelledBy = bookedBy;
+                cancellationTimestamp = admin.firestore.FieldValue.serverTimestamp();
+                bookedBy = null;
+                isBooked = false;
+                available = true;
+                preBooked = false;
             }
 
             slots.push({
@@ -145,15 +157,17 @@ const populateData = async () => {
                 isBooked,
                 bookedBy,
                 available,
-                capacity: 2, // Assuming capacity of 2 for most slots
-                preBooked
+                capacity: 2,
+                preBooked,
+                cancelledBy: cancelledBy,
+                cancellationTimestamp: cancellationTimestamp
             });
         }
     }
 
-    // Add a few past slots (some booked, some available)
-    for (let d = 1; d <= 2; d++) { // 1 and 2 days ago
-        const pastDay = addDays(now, -d);
+    // Add a few past slots (some booked, some available, some cancelled for refund testing)
+    for (let d = 1; d <= 3; d++) {
+        const pastDay = subDays(now, d);
         for (let hour = 10; hour <= 12; hour += 1) {
             const slotTime = setMinutes(setHours(pastDay, hour), 0);
             const slotId = `past_${pastDay.toISOString().split('T')[0]}_${hour.toString().padStart(2, '0')}00`;
@@ -161,6 +175,16 @@ const populateData = async () => {
             let isBooked = Math.random() < 0.5;
             let bookedBy = isBooked ? members[Math.floor(Math.random() * members.length)].uid : null;
             let available = !isBooked;
+            let cancelledBy = null;
+            let cancellationTimestamp = null;
+
+            if (isBooked && Math.random() < 0.3 && d === 1) {
+                cancelledBy = bookedBy;
+                cancellationTimestamp = admin.firestore.Timestamp.fromDate(subDays(slotTime, 0.5));
+                bookedBy = null;
+                isBooked = false;
+                available = true;
+            }
 
             slots.push({
                 id: slotId,
@@ -170,7 +194,9 @@ const populateData = async () => {
                 bookedBy,
                 available,
                 capacity: 2,
-                preBooked: false
+                preBooked: false,
+                cancelledBy: cancelledBy,
+                cancellationTimestamp: cancellationTimestamp
             });
         }
     }
@@ -183,15 +209,13 @@ const populateData = async () => {
 
     // --- 4. Waiting Lists (for some 'full' slots) ---
     const waitingLists = [];
-    // Find some slots that are "booked" and we can pretend are "full"
     const potentialFullSlots = slots.filter(s => s.isBooked && s.capacity === 2 && s.bookedBy !== members.find(m => m.email === adminEmail)?.uid && (s.timestamp.toDate() > now));
 
-    for (let i = 0; i < Math.min(5, potentialFullSlots.length); i++) { // Add up to 5 waiting lists
+    for (let i = 0; i < Math.min(5, potentialFullSlots.length); i++) {
         const slot = potentialFullSlots[i];
         const usersOnWaitingList = [];
-        const numUsersOnList = Math.floor(Math.random() * 3) + 1; // 1 to 3 users
+        const numUsersOnList = Math.floor(Math.random() * 3) + 1;
 
-        // Ensure users are not the one who booked the slot
         const potentialWaiters = members.filter(m => m.uid !== slot.bookedBy);
 
         for (let j = 0; j < numUsersOnList; j++) {
@@ -202,7 +226,7 @@ const populateData = async () => {
         }
 
         if (usersOnWaitingList.length > 0) {
-            const waitingListId = `${slot.id}`; // Use slot ID as waiting list ID
+            const waitingListId = `${slot.id}`;
             waitingLists.push({
                 slotId: slot.id,
                 timestamp: slot.timestamp,
@@ -221,63 +245,96 @@ const populateData = async () => {
     console.log(`${waitingLists.length} waiting lists added.`);
 
 
-    // --- 5. Matches ---
+    // --- 5. Matches and Match History ---
     const matches = [];
-    const numMatches = 15;
+    const numMatches = 20;
+
+    const allMembersUids = members.map(m => m.uid);
 
     for (let i = 0; i < numMatches; i++) {
-        const randomSlot = slots[Math.floor(Math.random() * slots.length)];
-        const team1Player1 = members[Math.floor(Math.random() * members.length)].uid;
-        let team1Player2 = null;
-        let team2Player1 = null;
-        let team2Player2 = null;
+        const relevantSlots = slots.filter(s => s.timestamp.toDate() < now || s.timestamp.toDate() > addDays(now, 2));
+        if (relevantSlots.length === 0) continue;
 
-        // Ensure unique players within the match by filtering available players
-        let availablePlayersForMatch = members.filter(m => m.uid !== team1Player1);
+        const randomSlot = relevantSlots[Math.floor(Math.random() * relevantSlots.length)];
+        let team1Player1Uid = allMembersUids[Math.floor(Math.random() * allMembersUids.length)];
+        let team1Player2Uid = null;
+        let team2Player1Uid = null;
+        let team2Player2Uid = null;
+
+        let availablePlayersForMatch = allMembersUids.filter(uid => uid !== team1Player1Uid);
 
         const gameType = Math.random() < 0.5 ? 'Singles' : 'Doubles';
 
         if (gameType === 'Singles') {
             if (availablePlayersForMatch.length < 1) continue;
-            team2Player1 = availablePlayersForMatch[Math.floor(Math.random() * availablePlayersForMatch.length)].uid;
-        } else { // Doubles
-            if (availablePlayersForMatch.length < 3) continue; // Not enough players for doubles
-            team1Player2 = availablePlayersForMatch.splice(Math.floor(Math.random() * availablePlayersForMatch.length), 1)[0].uid;
-            team2Player1 = availablePlayersForMatch.splice(Math.floor(Math.random() * availablePlayersForMatch.length), 1)[0].uid;
-            team2Player2 = availablePlayersForMatch.splice(Math.floor(Math.random() * availablePlayersForMatch.length), 1)[0].uid;
+            team2Player1Uid = availablePlayersForMatch[Math.floor(Math.random() * availablePlayersForMatch.length)];
+        } else {
+            if (availablePlayersForMatch.length < 3) continue;
+            team1Player2Uid = availablePlayersForMatch.splice(Math.floor(Math.random() * availablePlayersForMatch.length), 1)[0];
+            team2Player1Uid = availablePlayersForMatch.splice(Math.floor(Math.random() * availablePlayersForMatch.length), 1)[0];
+            team2Player2Uid = availablePlayersForMatch.splice(Math.floor(Math.random() * availablePlayersForMatch.length), 1)[0];
         }
 
-        const team1 = [team1Player1, team1Player2].filter(Boolean);
-        const team2 = [team2Player1, team2Player2].filter(Boolean);
+        const team1 = [team1Player1Uid, team1Player2Uid].filter(Boolean);
+        const team2 = [team2Player1Uid, team2Player2Uid].filter(Boolean);
 
-        // Ensure team2 has players if it's a singles game, otherwise skip if issues with player selection
-        if (gameType === 'Singles' && team2.length === 0) continue;
-        if (gameType === 'Doubles' && (team1.length < 2 || team2.length < 2)) continue;
+        if (gameType === 'Singles' && (team1.length !== 1 || team2.length !== 1)) continue;
+        if (gameType === 'Doubles' && (team1.length !== 2 || team2.length !== 2)) continue;
 
         const statuses = ['confirmed', 'pending_confirmation', 'pending_score', 'rejected'];
-        const status = statuses[Math.floor(Math.random() * statuses.length)];
+        let status = statuses[Math.floor(Math.random() * statuses.length)];
+
+        if (randomSlot.timestamp.toDate() > now) {
+            if (status === 'confirmed' || status === 'pending_score' || status === 'rejected') {
+                status = Math.random() < 0.7 ? 'pending_confirmation' : 'pending_score';
+            }
+        } else {
+            if (status === 'pending_confirmation' || status === 'pending_score') {
+                status = Math.random() < 0.8 ? 'confirmed' : 'rejected';
+            }
+        }
 
         let scores = { team1: null, team2: null };
         if (status === 'confirmed') {
             scores = {
-                team1: Math.floor(Math.random() * 21),
-                team2: Math.floor(Math.random() * 21)
+                team1: Math.floor(Math.random() * 10) + 11,
+                team2: Math.floor(Math.random() * 10) + 11
             };
-            while (scores.team1 === scores.team2) { // Ensure scores are not equal
-                scores.team2 = Math.floor(Math.random() * 21);
+            while (scores.team1 === scores.team2) {
+                scores.team2 = Math.floor(Math.random() * 10) + 11;
             }
+        } else if (status === 'pending_score') {
+             if (Math.random() < 0.5) {
+                scores = {
+                    team1: Math.floor(Math.random() * 21),
+                    team2: Math.floor(Math.random() * 21)
+                };
+                while (scores.team1 === scores.team2) {
+                    scores.team2 = Math.floor(Math.random() * 21);
+                }
+             } else {
+                 scores = { team1: null, team2: null };
+             }
         }
 
         let confirmedBy = [];
         if (status === 'confirmed' || status === 'pending_score') {
-            confirmedBy = [...team1, ...team2];
+            confirmedBy = [...new Set([...team1, ...team2])];
         } else if (status === 'pending_confirmation') {
             confirmedBy = [team1[0]];
+            if (team2.length > 0 && Math.random() < 0.5) {
+                confirmedBy.push(team2[Math.floor(Math.random() * team2.length)]);
+            }
+            confirmedBy = [...new Set(confirmedBy)];
         }
 
         const createdBy = team1[0];
+        const adminUid = members.find(m => m.role === 'admin')?.uid || members[0].uid;
 
-        matches.push({
+        const matchId = db.collection(`artifacts/${appId}/public/data/matches`).doc().id;
+
+        const matchData = {
+            id: matchId,
             slotTimestamp: randomSlot.timestamp,
             slotTime: randomSlot.time,
             gameType: gameType,
@@ -288,18 +345,80 @@ const populateData = async () => {
             scores: scores,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
             createdBy: createdBy,
-            rejectedBy: status === 'rejected' ? members.find(m => m.email === adminEmail)?.uid : null, // Admin rejects
+            rejectedBy: status === 'rejected' ? adminUid : null,
             rejectedAt: status === 'rejected' ? admin.firestore.FieldValue.serverTimestamp() : null,
-            submittedBy: status === 'confirmed' ? members.find(m => m.email === adminEmail)?.uid : null, // Admin submits score
-            submittedAt: status === 'confirmed' ? admin.firestore.FieldValue.serverTimestamp() : null
-        });
+            submittedBy: (status === 'confirmed' && scores.team1 !== null) ? adminUid : null,
+            submittedAt: (status === 'confirmed' && scores.team1 !== null) ? admin.firestore.FieldValue.serverTimestamp() : null
+        };
+        matches.push(matchData);
+
+        const matchRef = db.doc(`artifacts/${appId}/public/data/matches/${matchId}`);
+        batch.set(matchRef, matchData);
+
+        if (status === 'confirmed' && scores.team1 !== null) {
+            const allPlayersInMatch = [...team1, ...team2];
+            const team1AvgElo = team1.reduce((sum, uid) => sum + (members.find(m => m.uid === uid)?.eloRating || 1000), 0) / team1.length;
+            const team2AvgElo = team2.reduce((sum, uid) => sum + (members.find(m => m.uid === uid)?.eloRating || 1000), 0) / team2.length;
+
+            let outcomeTeam1;
+            if (scores.team1 > scores.team2) {
+                outcomeTeam1 = 1;
+            } else if (scores.team2 > scores.team1) {
+                outcomeTeam1 = 0;
+            } else {
+                outcomeTeam1 = 0.5;
+            }
+
+            for (const playerId of allPlayersInMatch) {
+                const player = members.find(m => m.uid === playerId);
+                if (!player) continue;
+
+                const currentElo = player.eloRating || 1000;
+                const gamesPlayed = player.gamesPlayed || 0;
+
+                let playerOutcome;
+                let opponentAvgEloForPlayer;
+                if (team1.includes(playerId)) {
+                    playerOutcome = outcomeTeam1;
+                    opponentAvgEloForPlayer = team2AvgElo;
+                } else {
+                    playerOutcome = 1 - outcomeTeam1;
+                    opponentAvgEloForPlayer = team1AvgElo;
+                }
+
+                const K_FACTOR = 32;
+                const expectedScore = 1 / (1 + Math.pow(10, (opponentAvgEloForPlayer - currentElo) / 400));
+                const eloChange = K_FACTOR * (playerOutcome - expectedScore);
+                const newElo = Math.max(100, Math.round(currentElo + eloChange));
+
+                const matchHistoryRef = db.doc(`artifacts/${appId}/users/${playerId}/matches_played/${matchId}`);
+                batch.set(matchHistoryRef, {
+                    matchId: matchId,
+                    date: randomSlot.timestamp.toDate().toISOString().split('T')[0],
+                    time: randomSlot.time,
+                    gameType: gameType,
+                    team1: team1,
+                    team2: team2,
+                    scoreTeam1: scores.team1,
+                    scoreTeam2: scores.team2,
+                    playerTeam: team1.includes(playerId) ? 'team1' : 'team2',
+                    eloChange: eloChange,
+                    oldElo: currentElo,
+                    newElo: newElo,
+                    outcome: playerOutcome,
+                    timestamp: admin.firestore.FieldValue.serverTimestamp()
+                });
+
+                player.eloRating = newElo;
+                player.gamesPlayed = (player.gamesPlayed || 0) + 1;
+                player.wins = (player.wins || 0) + (playerOutcome === 1 ? 1 : 0);
+                player.losses = (player.losses || 0) + (playerOutcome === 0 ? 1 : 0);
+                player.draws = (player.draws || 0) + (playerOutcome === 0.5 ? 1 : 0);
+            }
+        }
     }
 
-    matches.forEach(match => {
-        const matchRef = db.collection(`artifacts/${appId}/public/data/matches`).doc();
-        batch.set(matchRef, match);
-    });
-    console.log(`${matches.length} matches added.`);
+    console.log(`${matches.length} matches added and corresponding match history entries created for confirmed matches.`);
 
 
     // --- Commit Batch ---
